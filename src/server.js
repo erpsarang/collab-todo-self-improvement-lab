@@ -35,8 +35,7 @@ function readJson(request) {
   });
 }
 
-function serveStatic(request, response) {
-  const pathname = new URL(request.url, 'http://localhost').pathname;
+function serveStatic(pathname, response) {
   const relativePath = pathname === '/' ? 'index.html' : pathname.slice(1);
   const filePath = path.resolve(publicDirectory, relativePath);
 
@@ -57,7 +56,13 @@ function serveStatic(request, response) {
 
 function createServer(service = createTodoService(createTodoStore())) {
   return http.createServer(async (request, response) => {
-    const pathname = new URL(request.url, 'http://localhost').pathname;
+    let pathname;
+    try {
+      pathname = new URL(request.url, 'http://localhost').pathname;
+    } catch {
+      sendJson(response, 400, { error: 'Invalid request target' });
+      return;
+    }
 
     if (request.method === 'GET' && pathname === '/api/todos') {
       sendJson(response, 200, service.list());
@@ -75,7 +80,7 @@ function createServer(service = createTodoService(createTodoStore())) {
     }
 
     if (request.method === 'GET') {
-      serveStatic(request, response);
+      serveStatic(pathname, response);
       return;
     }
 
