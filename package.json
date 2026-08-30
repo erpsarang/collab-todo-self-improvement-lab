@@ -1,0 +1,13 @@
+{
+  "name": "collab-todo-self-improvement-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A minimal shared collaborative to-do application",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

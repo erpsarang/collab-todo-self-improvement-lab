@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>함께하는 To-do</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">SHARED WORKSPACE</p>
+      <h1>함께하는 To-do</h1>
+      <p>하나의 목록에 오늘의 할 일을 모아보세요.</p>
+    </header>
+
+    <section class="card" aria-labelledby="create-heading">
+      <h2 id="create-heading">새 할 일</h2>
+      <form id="todo-form">
+        <label>내 이름<input id="created-by" name="createdBy" required placeholder="이름을 입력하세요"></label>
+        <label>할 일<input id="title" name="title" required placeholder="무엇을 해야 하나요?"></label>
+        <button type="submit">추가하기</button>
+      </form>
+      <p id="form-error" class="error" role="alert"></p>
+    </section>
+
+    <section class="list-section" aria-labelledby="list-heading">
+      <div class="list-heading"><h2 id="list-heading">모든 할 일</h2><span id="todo-count">0개</span></div>
+      <ul id="todo-list"></ul>
+      <p id="empty-state" class="empty">아직 할 일이 없습니다. 첫 할 일을 추가해 보세요.</p>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
