@@ -22,7 +22,11 @@ test('fork-safe review runs after an unprivileged merge gate in trusted context'
   assert.doesNotMatch(gate, /checkout|OPENAI_API_KEY|pull_request_target/);
   assert.match(workflow, /workflow_run:/);
   assert.match(workflow, /Merged PR Review Gate/);
-  assert.match(workflow, /listWorkflowRunPullRequests/);
+  assert.match(
+    workflow,
+    /github\.request\(\s*'GET \/repos\/\{owner\}\/\{repo\}\/actions\/runs\/\{run_id\}\/pull_requests'/,
+  );
+  assert.doesNotMatch(workflow, /github\.rest\.actions\.listWorkflowRunPullRequests/);
   assert.match(workflow, /pr\.merged_by\?\.type !== 'User'/);
   assert.match(workflow, /pr\.merge_commit_sha/);
   assert.doesNotMatch(workflow, /github\.event\.workflow_run\.head_sha/);
