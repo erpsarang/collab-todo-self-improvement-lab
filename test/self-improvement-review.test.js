@@ -28,6 +28,18 @@ test('fork-safe review runs after an unprivileged merge gate in trusted context'
   assert.doesNotMatch(workflow, /github\.event\.workflow_run\.head_sha/);
 });
 
+test('trusted review grants only the read permissions required by its APIs', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+  const permissions = workflow.match(/^permissions:\n((?:  [^\n]+\n)+)/m);
+
+  assert.ok(permissions, 'workflow must declare explicit permissions');
+  assert.equal(
+    permissions[1],
+    '  actions: read\n  contents: read\n  pull-requests: read\n',
+  );
+  assert.doesNotMatch(permissions[1], /write/);
+});
+
 test('workflow uses Codex read-only and publishes only the validated result', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
   assert.match(workflow, /uses: openai\/codex-action@v1/);

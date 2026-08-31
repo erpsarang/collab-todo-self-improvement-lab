@@ -10,7 +10,9 @@ on:
 # This workflow observes repository state only. It cannot create issues, update
 # pull requests, push branches, or change labels.
 permissions:
+  actions: read
   contents: read
+  pull-requests: read
 
 jobs:
   review:
