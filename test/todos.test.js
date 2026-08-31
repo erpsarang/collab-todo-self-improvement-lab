@@ -34,6 +34,14 @@ function patchStatus(server, id, status) {
   });
 }
 
+function patchAssignee(server, id, assignedTo) {
+  return request(server, `/api/todos/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assignedTo })
+  });
+}
+
 test('creates a valid to-do', () => {
   const todo = service().create({ title: '요구사항 정리', createdBy: '상열' });
   assert.deepEqual(todo, { id: 'todo-1', title: '요구사항 정리', status: 'TODO', createdBy: '상열' });
@@ -51,6 +59,35 @@ test('lists a created to-do', () => {
   const todos = service();
   const created = todos.create({ title: '함께 확인하기', createdBy: 'Lee' });
   assert.deepEqual(todos.list(), [created]);
+});
+
+test('handles a to-do without an assignee', () => {
+  const todos = service();
+  todos.create({ title: '담당자 미정', createdBy: 'Lee' });
+  assert.equal(todos.list()[0].assignedTo, undefined);
+});
+
+test('assigns and changes an assignee', () => {
+  const todos = service();
+  todos.create({ title: '담당 업무', createdBy: 'Lee' });
+
+  assert.equal(todos.update('todo-1', { assignedTo: '민수' }).assignedTo, '민수');
+  assert.equal(todos.update('todo-1', { assignedTo: '지수' }).assignedTo, '지수');
+});
+
+test('trims an assignee name', () => {
+  const todos = service();
+  todos.create({ title: '담당 업무', createdBy: 'Lee' });
+  assert.equal(todos.update('todo-1', { assignedTo: '  민수  ' }).assignedTo, '민수');
+});
+
+test('rejects invalid assignee values', () => {
+  const todos = service();
+  todos.create({ title: '담당 업무', createdBy: 'Lee' });
+  for (const assignedTo of ['', '   ', null, 42]) {
+    assert.throws(() => todos.update('todo-1', { assignedTo }), /Assignee must/);
+  }
+  assert.equal(todos.list()[0].assignedTo, undefined);
 });
 
 test('changes a TODO to-do to DOING', () => {
@@ -103,6 +140,31 @@ test('lists the changed status after a PATCH request', async (t) => {
 
   const listed = await request(server, '/api/todos');
   assert.equal(JSON.parse(listed.body)[0].status, 'DONE');
+});
+
+test('returns 404 when assigning a missing to-do', async (t) => {
+  const server = createServer(service());
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const response = await patchAssignee(server, 'missing', '민수');
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(JSON.parse(response.body), { error: 'To-do not found' });
+});
+
+test('lists the changed assignee after a PATCH request', async (t) => {
+  const todos = service();
+  todos.create({ title: '공유 담당자', createdBy: 'Lee' });
+  const server = createServer(todos);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+
+  const changed = await patchAssignee(server, 'todo-1', '  민수  ');
+  assert.equal(changed.statusCode, 200);
+  assert.equal(JSON.parse(changed.body).assignedTo, '민수');
+
+  const listed = await request(server, '/api/todos');
+  assert.equal(JSON.parse(listed.body)[0].assignedTo, '민수');
 });
 
 test('returns 400 for a malformed request target without stopping the server', async (t) => {
