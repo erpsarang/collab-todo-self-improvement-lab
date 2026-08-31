@@ -1,0 +1,47 @@
+name: Self-Improvement Review
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+# This workflow observes repository state only. It cannot create issues, update
+# pull requests, push branches, or change labels.
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  review:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the merged repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Review for a high-value candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MERGED_PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
+          MERGE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/self-improvement-review.js
+
+      - name: Upload review result
+        if: always() && hashFiles('self-improvement-result.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-improvement-review
+          path: self-improvement-result.md
+          if-no-files-found: error
+          retention-days: 7
