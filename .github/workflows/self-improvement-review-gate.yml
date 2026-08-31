@@ -1,0 +1,21 @@
+name: Merged PR Review Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+# This unprivileged workflow deliberately does not check out or execute PR code.
+# Its successful completion is only a signal for the trusted workflow_run job.
+permissions:
+  contents: read
+
+jobs:
+  merged:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record the trusted merge event
+        run: echo "Merged pull request observed by the default-branch workflow"
