@@ -10,11 +10,36 @@ function render(todos) {
     const details = document.createElement('div');
     const title = document.createElement('strong');
     const creator = document.createElement('span');
-    const status = document.createElement('span');
+    const status = document.createElement('select');
     title.textContent = todo.title;
     creator.textContent = `만든 사람: ${todo.createdBy}`;
     status.className = 'status';
-    status.textContent = todo.status;
+    status.setAttribute('aria-label', `${todo.title} 상태`);
+    for (const value of ['TODO', 'DOING', 'DONE']) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      option.selected = value === todo.status;
+      status.append(option);
+    }
+    status.addEventListener('change', async () => {
+      errorMessage.textContent = '';
+      status.disabled = true;
+      try {
+        const response = await fetch(`/api/todos/${encodeURIComponent(todo.id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: status.value })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error);
+        await loadTodos();
+      } catch (error) {
+        errorMessage.textContent = error.message;
+        status.value = todo.status;
+        status.disabled = false;
+      }
+    });
     details.append(title, creator);
     item.append(details, status);
     return item;

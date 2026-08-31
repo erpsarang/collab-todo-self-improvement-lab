@@ -1,4 +1,5 @@
 const { randomUUID } = require('node:crypto');
+const allowedStatuses = new Set(['TODO', 'DOING', 'DONE']);
 
 function createTodoService(store, createId = randomUUID) {
   return {
@@ -22,6 +23,13 @@ function createTodoService(store, createId = randomUUID) {
     },
     list() {
       return store.list();
+    },
+    updateStatus(id, input = {}) {
+      if (!allowedStatuses.has(input.status)) {
+        throw new Error('Status must be TODO, DOING, or DONE');
+      }
+
+      return store.updateStatus(id, input.status);
     }
   };
 }
