@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
-const { mkdtempSync, readFileSync, writeFileSync } = require('node:fs');
+const { execFileSync, spawnSync } = require('node:child_process');
+const { existsSync, mkdtempSync, readFileSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { readMergedDiff, validate } = require('../scripts/self-improvement-review');
@@ -9,7 +9,62 @@ const { readMergedDiff, validate } = require('../scripts/self-improvement-review
 test('workflow checks out the merged SHA with full history', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
   assert.match(workflow, /fetch-depth: 0/);
-  assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.merge_commit_sha \}\}/);
+  assert.match(workflow, /ref: \$\{\{ steps\.merged-pr\.outputs\.merge-sha \}\}/);
+  assert.doesNotMatch(workflow, /ref:.*(?:head_sha|head\.sha)/);
+});
+
+test('fork-safe review runs after an unprivileged merge gate in trusted context', () => {
+  const gate = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review-gate.yml'), 'utf8');
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+
+  assert.match(gate, /pull_request:/);
+  assert.match(gate, /if: github\.event\.pull_request\.merged == true/);
+  assert.doesNotMatch(gate, /checkout|OPENAI_API_KEY|pull_request_target/);
+  assert.match(workflow, /workflow_run:/);
+  assert.match(workflow, /Merged PR Review Gate/);
+  assert.match(workflow, /listWorkflowRunPullRequests/);
+  assert.match(workflow, /pr\.merged_by\?\.type !== 'User'/);
+  assert.match(workflow, /pr\.merge_commit_sha/);
+  assert.doesNotMatch(workflow, /github\.event\.workflow_run\.head_sha/);
+});
+
+test('trusted review grants only the read permissions required by its APIs', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+  const permissions = workflow.match(/^permissions:\n((?:  [^\n]+\n)+)/m);
+
+  assert.ok(permissions, 'workflow must declare explicit permissions');
+  assert.equal(
+    permissions[1],
+    '  actions: read\n  contents: read\n  pull-requests: read\n',
+  );
+  assert.doesNotMatch(permissions[1], /write/);
+});
+
+test('workflow uses Codex read-only and publishes only the validated result', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+  assert.match(workflow, /uses: openai\/codex-action@v1/);
+  assert.match(workflow, /openai-api-key: \$\{\{ secrets\.OPENAI_API_KEY \}\}/);
+  assert.match(workflow, /sandbox: read-only/);
+  assert.match(workflow, /output-file: self-improvement-raw\.md/);
+  assert.match(workflow, /node scripts\/self-improvement-review\.js validate/);
+  assert.match(workflow, /path: self-improvement-result\.md/);
+  assert.doesNotMatch(workflow, /models\.github\.ai|models: read/);
+  assert.doesNotMatch(workflow, /path: self-improvement-raw\.md/);
+});
+
+test('an invalid raw Codex result does not create the artifact file', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'self-improvement-validation-'));
+  t.after(() => require('node:fs').rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(join(directory, 'self-improvement-raw.md'), 'untrusted output');
+
+  const validation = spawnSync(
+    process.execPath,
+    [join(__dirname, '../scripts/self-improvement-review.js'), 'validate'],
+    { cwd: directory, encoding: 'utf8' },
+  );
+
+  assert.notEqual(validation.status, 0);
+  assert.equal(existsSync(join(directory, 'self-improvement-result.md')), false);
 });
 
 test('merged diff includes every commit in a multi-commit rebase merge', (t) => {

@@ -4,8 +4,8 @@ const { execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync } = require('node:fs');
 
 const OUTPUT = 'self-improvement-result.md';
-const API_URL = 'https://models.github.ai/inference/chat/completions';
-const MODEL = 'openai/gpt-4.1';
+const PROMPT = 'self-improvement-prompt.md';
+const RAW_OUTPUT = 'self-improvement-raw.md';
 const MAX_CONTEXT_CHARS = 80_000;
 
 function git(...args) {
@@ -138,20 +138,27 @@ function validate(result) {
   return normalized + '\n';
 }
 
-async function main() {
-  if (!process.env.GITHUB_TOKEN) throw new Error('GITHUB_TOKEN is required');
-  const response = await fetch(API_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.GITHUB_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: MODEL, temperature: 0.1, max_tokens: 1800, messages: [{ role: 'user', content: prompt(repositoryContext()) }] }),
-  });
-  if (!response.ok) throw new Error(`GitHub Models request failed (${response.status}): ${await response.text()}`);
-  const body = await response.json();
-  const result = body.choices?.[0]?.message?.content;
-  if (typeof result !== 'string') throw new Error('GitHub Models returned no review text');
-  writeFileSync(OUTPUT, validate(result), 'utf8');
+function main(command = process.argv[2]) {
+  if (command === 'prepare') {
+    writeFileSync(PROMPT, prompt(repositoryContext()), 'utf8');
+    return;
+  }
+  if (command === 'validate') {
+    const result = readFileSync(RAW_OUTPUT, 'utf8');
+    if (!/\S/u.test(result)) throw new Error('Codex returned no review text');
+    writeFileSync(OUTPUT, validate(result), 'utf8');
+    return;
+  }
+  throw new Error('Usage: self-improvement-review.js <prepare|validate>');
 }
 
-if (require.main === module) main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
+}
 
 module.exports = { readMergedDiff, validate };
