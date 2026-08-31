@@ -45,6 +45,20 @@ test('a candidate must clear every value and evidence threshold', () => {
   assert.throws(() => validate(weak), /thresholds/);
 });
 
+test('a candidate must have content in every required section', async (t) => {
+  const strong = `# Result\n\nCANDIDATE\n\n## Title\nData safety\n## Observation\nObserved\n## Evidence\nsrc/store.js behavior\n## Impact\nData loss\n## Scores\n- User Impact: 3\n- Reliability Impact: 3\n- Collaboration Impact: 2\n- Evidence Strength: 3\n- Urgency: 2\n\nTotal: 13/15\n## Suggested Scope\nPersist data\n## Non-Goals\nExternal database`;
+
+  for (const heading of ['Title', 'Observation', 'Evidence', 'Impact', 'Suggested Scope', 'Non-Goals']) {
+    await t.test(heading, () => {
+      const emptySection = strong.replace(
+        new RegExp(`(## ${heading}\\n)[\\s\\S]*?(?=\\n## |$)`),
+        `$1   \n`,
+      );
+      assert.throws(() => validate(emptySection), new RegExp(`empty ${heading} section`));
+    });
+  }
+});
+
 test('a well-formed candidate with sufficient scores is accepted', () => {
   const strong = `# Result\n\nCANDIDATE\n\n## Title\nData safety\n## Observation\nObserved\n## Evidence\nsrc/store.js behavior\n## Impact\nData loss\n## Scores\n- User Impact: 3\n- Reliability Impact: 3\n- Collaboration Impact: 2\n- Evidence Strength: 3\n- Urgency: 2\n\nTotal: 13/15\n## Suggested Scope\nPersist data\n## Non-Goals\nExternal database`;
   assert.match(validate(strong), /Total: 13\/15/);

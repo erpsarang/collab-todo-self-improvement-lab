@@ -114,8 +114,15 @@ function validate(result) {
   if (/^# Result\s+NO_CANDIDATE\s+## Reason\s+\S[\s\S]*$/u.test(normalized)) return normalized + '\n';
   if (!/^# Result\s+CANDIDATE\s+/u.test(normalized)) throw new Error('Model returned an unknown result');
 
-  for (const heading of ['Title', 'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals']) {
-    if (!normalized.includes(`## ${heading}`)) throw new Error(`Candidate is missing ${heading}`);
+  const requiredSections = ['Title', 'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals'];
+  const headings = [...normalized.matchAll(/^## ([^\r\n]+?)[ \t]*$/gm)];
+  const sections = new Map(headings.map((match, index) => [
+    match[1],
+    normalized.slice(match.index + match[0].length, headings[index + 1]?.index ?? normalized.length),
+  ]));
+  for (const heading of requiredSections) {
+    if (!sections.has(heading)) throw new Error(`Candidate is missing ${heading}`);
+    if (!/\S/u.test(sections.get(heading))) throw new Error(`Candidate has an empty ${heading} section`);
   }
   const labels = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
   const scores = Object.fromEntries(labels.map((label) => {
