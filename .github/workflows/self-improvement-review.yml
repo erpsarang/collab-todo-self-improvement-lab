@@ -21,7 +21,10 @@ jobs:
       - name: Check out the merged repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # Rebase merges can add every PR commit after base.sha, so retain the
+          # complete history needed to diff that exact pre-merge base.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           persist-credentials: false
 
       - name: Set up Node.js

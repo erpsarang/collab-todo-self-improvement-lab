@@ -12,6 +12,16 @@ function git(...args) {
   return execFileSync('git', args, { encoding: 'utf8' });
 }
 
+function readMergedDiff(base, runGit = git) {
+  if (!base || !/^[0-9a-f]{7,40}$/i.test(base)) return '(merge base was unavailable)';
+
+  try {
+    return runGit('diff', '--stat', base, 'HEAD') + '\n' + runGit('diff', '--no-ext-diff', base, 'HEAD');
+  } catch {
+    return '(the merged diff could not be read; use the repository and recent history)';
+  }
+}
+
 function repositoryContext() {
   const files = git('ls-files')
     .split('\n')
@@ -28,15 +38,7 @@ function repositoryContext() {
     }
   }
 
-  const base = process.env.MERGE_BASE_SHA;
-  let mergedDiff = '(merge base was unavailable)';
-  if (base && /^[0-9a-f]{7,40}$/i.test(base)) {
-    try {
-      mergedDiff = git('diff', '--stat', base, 'HEAD') + '\n' + git('diff', '--no-ext-diff', base, 'HEAD');
-    } catch {
-      mergedDiff = '(the merged diff could not be read; use the repository and recent history)';
-    }
-  }
+  const mergedDiff = readMergedDiff(process.env.MERGE_BASE_SHA);
 
   const context = [
     `Merged PR: #${process.env.MERGED_PR_NUMBER || 'unknown'} ${process.env.MERGED_PR_TITLE || ''}`,
@@ -145,4 +147,4 @@ async function main() {
 
 if (require.main === module) main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 
-module.exports = { validate };
+module.exports = { readMergedDiff, validate };
