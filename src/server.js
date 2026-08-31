@@ -79,6 +79,21 @@ function createServer(service = createTodoService(createTodoStore())) {
       return;
     }
 
+    const todoMatch = pathname.match(/^\/api\/todos\/([^/]+)$/);
+    if (request.method === 'PATCH' && todoMatch) {
+      try {
+        const todo = service.updateStatus(decodeURIComponent(todoMatch[1]), await readJson(request));
+        if (!todo) {
+          sendJson(response, 404, { error: 'To-do not found' });
+          return;
+        }
+        sendJson(response, 200, todo);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+      return;
+    }
+
     if (request.method === 'GET') {
       serveStatic(pathname, response);
       return;

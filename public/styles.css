@@ -23,6 +23,7 @@ ul { display: grid; gap: 10px; padding: 0; list-style: none; }
 li { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-radius: 12px; background: white; box-shadow: 0 4px 12px rgba(45,57,42,.05); }
 li div { display: grid; gap: 5px; }
 li div span { color: #73786f; font-size: .85rem; }
-.status { border-radius: 99px; padding: 5px 9px; color: #315b41; background: #e2eee1; font-size: .72rem; font-weight: 800; }
+.status { border: 1px solid #c5d7c4; border-radius: 99px; padding: 5px 9px; color: #315b41; background: #e2eee1; font: inherit; font-size: .72rem; font-weight: 800; cursor: pointer; }
+.status:focus { outline: 3px solid #bfd4bf; }
 .empty { padding: 40px 0; text-align: center; color: #777d75; }
 @media (max-width: 620px) { main { padding-top: 36px; } form { grid-template-columns: 1fr; } button { margin-top: 4px; } }

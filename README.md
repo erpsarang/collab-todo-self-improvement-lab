@@ -25,3 +25,4 @@ npm test
 
 - `GET /api/todos`: 저장된 모든 할 일 조회
 - `POST /api/todos`: `{ "title": "요구사항 정리", "createdBy": "상열" }` 형식으로 할 일 생성
+- `PATCH /api/todos/:id`: `{ "status": "DOING" }` 형식으로 상태 변경 (`TODO`, `DOING`, `DONE`만 허용)
