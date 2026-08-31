@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
-const { mkdtempSync, readFileSync, writeFileSync } = require('node:fs');
+const { execFileSync, spawnSync } = require('node:child_process');
+const { existsSync, mkdtempSync, readFileSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { readMergedDiff, validate } = require('../scripts/self-improvement-review');
@@ -10,6 +10,33 @@ test('workflow checks out the merged SHA with full history', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.merge_commit_sha \}\}/);
+});
+
+test('workflow uses Codex read-only and publishes only the validated result', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+  assert.match(workflow, /uses: openai\/codex-action@v1/);
+  assert.match(workflow, /openai-api-key: \$\{\{ secrets\.OPENAI_API_KEY \}\}/);
+  assert.match(workflow, /sandbox: read-only/);
+  assert.match(workflow, /output-file: self-improvement-raw\.md/);
+  assert.match(workflow, /node scripts\/self-improvement-review\.js validate/);
+  assert.match(workflow, /path: self-improvement-result\.md/);
+  assert.doesNotMatch(workflow, /models\.github\.ai|models: read/);
+  assert.doesNotMatch(workflow, /path: self-improvement-raw\.md/);
+});
+
+test('an invalid raw Codex result does not create the artifact file', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'self-improvement-validation-'));
+  t.after(() => require('node:fs').rmSync(directory, { recursive: true, force: true }));
+  writeFileSync(join(directory, 'self-improvement-raw.md'), 'untrusted output');
+
+  const validation = spawnSync(
+    process.execPath,
+    [join(__dirname, '../scripts/self-improvement-review.js'), 'validate'],
+    { cwd: directory, encoding: 'utf8' },
+  );
+
+  assert.notEqual(validation.status, 0);
+  assert.equal(existsSync(join(directory, 'self-improvement-result.md')), false);
 });
 
 test('merged diff includes every commit in a multi-commit rebase merge', (t) => {

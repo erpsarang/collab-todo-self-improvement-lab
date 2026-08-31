@@ -11,7 +11,6 @@ on:
 # pull requests, push branches, or change labels.
 permissions:
   contents: read
-  models: read
 
 jobs:
   review:
@@ -32,16 +31,25 @@ jobs:
         with:
           node-version: 20
 
-      - name: Review for a high-value candidate
+      - name: Prepare repository context
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           MERGED_PR_NUMBER: ${{ github.event.pull_request.number }}
           MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
           MERGE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: node scripts/self-improvement-review.js
+        run: node scripts/self-improvement-review.js prepare
+
+      - name: Review for a high-value candidate
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: self-improvement-prompt.md
+          output-file: self-improvement-raw.md
+          sandbox: read-only
+
+      - name: Validate review result
+        run: node scripts/self-improvement-review.js validate
 
       - name: Upload review result
-        if: always() && hashFiles('self-improvement-result.md') != ''
         uses: actions/upload-artifact@v4
         with:
           name: self-improvement-review
