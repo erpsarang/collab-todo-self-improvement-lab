@@ -30,6 +30,22 @@ function createTodoService(store, createId = randomUUID) {
       }
 
       return store.updateStatus(id, input.status);
+    },
+    update(id, input = {}) {
+      const fields = Object.keys(input);
+      if (fields.length !== 1 || !['status', 'assignedTo'].includes(fields[0])) {
+        throw new Error('Exactly one of status or assignedTo is required');
+      }
+
+      if (fields[0] === 'status') {
+        return this.updateStatus(id, input);
+      }
+
+      if (typeof input.assignedTo !== 'string' || !input.assignedTo.trim()) {
+        throw new Error('Assignee must be a non-empty string');
+      }
+
+      return store.updateAssignedTo(id, input.assignedTo.trim());
     }
   };
 }

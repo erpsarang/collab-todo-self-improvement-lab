@@ -15,6 +15,13 @@ function createTodoStore() {
 
       todo.status = status;
       return todo;
+    },
+    updateAssignedTo(id, assignedTo) {
+      const todo = todos.find((item) => item.id === id);
+      if (!todo) return null;
+
+      todo.assignedTo = assignedTo;
+      return todo;
     }
   };
 }
