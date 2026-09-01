@@ -12,6 +12,7 @@ on:
 permissions:
   actions: read
   contents: read
+  issues: read
   pull-requests: read
 
 jobs:
@@ -59,6 +60,21 @@ jobs:
             core.setOutput('title', pr.title);
             core.setOutput('base-sha', pr.base.sha);
             core.setOutput('merge-sha', pr.merge_commit_sha);
+            const closingIssues = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    closingIssuesReferences(first: 10) {
+                      nodes { number title body }
+                    }
+                  }
+                }
+              }
+            `, { owner: context.repo.owner, repo: context.repo.repo, number: pr.number });
+            core.setOutput(
+              'closing-issues-json',
+              JSON.stringify(closingIssues.repository.pullRequest.closingIssuesReferences.nodes),
+            );
 
       - name: Check out the merged repository
         uses: actions/checkout@v4
@@ -79,6 +95,7 @@ jobs:
           MERGED_PR_NUMBER: ${{ steps.merged-pr.outputs.number }}
           MERGED_PR_TITLE: ${{ steps.merged-pr.outputs.title }}
           MERGE_BASE_SHA: ${{ steps.merged-pr.outputs.base-sha }}
+          CLOSING_ISSUES_JSON: ${{ steps.merged-pr.outputs.closing-issues-json }}
         run: node scripts/self-improvement-review.js prepare
 
       - name: Review for a high-value candidate
