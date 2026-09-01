@@ -89,11 +89,25 @@ jobs:
               'Verification Target', 'Verification Evidence', 'Residual Risk', 'Title',
               'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals',
             ];
+            // Locate headings once so a section ends only at the next Markdown
+            // heading (or the actual end of the document), never at a line end.
+            const headings = [...markdown.matchAll(/^#{1,2}[ \t]+([^\r\n]+)[ \t]*$/gmu)]
+              .map((match) => ({
+                name: match[1].trim(),
+                level: match[0].startsWith('##') ? 2 : 1,
+                start: match.index,
+                contentStart: match.index + match[0].length,
+              }));
             const sections = {};
             for (const name of sectionNames) {
-              const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const match = markdown.match(new RegExp(`^## ${escaped}\\s*\\n([\\s\\S]*?)(?=^## |^# |\\s*$)`, 'mu'));
-              sections[name] = match?.[1].trim() || '';
+              const headingIndex = headings.findIndex((heading) => heading.level === 2 && heading.name === name);
+              if (headingIndex === -1) {
+                sections[name] = '';
+                continue;
+              }
+              const heading = headings[headingIndex];
+              const nextHeading = headings.slice(headingIndex + 1).find(({ level }) => level <= 2);
+              sections[name] = markdown.slice(heading.contentStart, nextHeading?.start ?? markdown.length).trim();
             }
             for (const name of sectionNames.slice(3)) {
               if (!sections[name]) throw new Error(`Candidate is missing ${name}`);

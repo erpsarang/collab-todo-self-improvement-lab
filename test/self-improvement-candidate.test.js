@@ -1,12 +1,99 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
+const { readFileSync, mkdirSync, mkdtempSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { candidateKey, hasRunMarker, publicationDecision } = require('../scripts/self-improvement-candidate');
 const { candidateMemory } = require('../scripts/self-improvement-review');
 
 const workflowPath = join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml');
 const workflow = () => readFileSync(workflowPath, 'utf8');
+
+function workflowScript(source, stepName) {
+  const step = source.indexOf(`      - name: ${stepName}`);
+  const marker = source.indexOf('          script: |\n', step);
+  const end = source.indexOf('\n      - name:', marker + 1);
+  return source.slice(marker + '          script: |\n'.length, end === -1 ? source.length : end)
+    .split('\n').map((line) => line.startsWith('            ') ? line.slice(12) : line).join('\n');
+}
+
+test('review workflow GitHub Script parses without duplicate candidate bindings', () => {
+  const source = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+  const script = workflowScript(source, 'Verify the human-merged pull request');
+  assert.doesNotThrow(() => new Function(`return async function () {\n${script}\n}`));
+  assert.equal((script.match(/const candidates\b/g) || []).length, 0);
+  assert.match(script, /const mergedPrCandidates\b/);
+  assert.match(script, /const candidateMemoryEntries\b/);
+});
+
+test('publisher preserves complete multiline candidate sections in the registry Issue body', async () => {
+  const source = workflow();
+  const script = workflowScript(source, 'Publish candidate record');
+  assert.doesNotThrow(() => new Function(`return async function () {\n${script}\n}`));
+
+  const scores = '- Value: 5\n- Breadth: 4\n- Confidence: 5\n- Safety: 4\n- Feasibility: 5\n- Total: 23';
+  const evidence = '- First evidence line\n- Second evidence line';
+  const scope = '- First scope item\n- Second scope item';
+  const nonGoals = '- First exclusion\n- Second exclusion';
+  const markdown = `# Verification PASS
+## Verification Target
+Merged implementation
+## Verification Evidence
+Check one passed.\nCheck two passed.
+## Residual Risk
+Risk line one.\nRisk line two.
+# Result CANDIDATE
+## Title
+Preserve multiline candidate sections
+## Observation
+Observation line one.\nObservation line two.
+## Evidence
+${evidence}
+## Impact
+Impact line one.\nImpact line two.
+## Scores
+${scores}
+## Suggested Scope
+${scope}
+## Non-Goals
+${nonGoals}`;
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-publisher-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-result.md'), markdown);
+  let created;
+  const github = {
+    paginate: async () => [],
+    rest: { issues: {
+      getLabel: async () => ({}),
+      createLabel: async () => ({}),
+      listForRepo: async () => ({ data: [] }),
+      listComments: async () => ({ data: [] }),
+      createComment: async () => ({}),
+      create: async (input) => { created = input; },
+    } },
+  };
+  const previousCwd = process.cwd();
+  const previousRun = process.env.SOURCE_RUN_ID;
+  const previousSha = process.env.SOURCE_HEAD_SHA;
+  process.chdir(directory);
+  process.env.SOURCE_RUN_ID = '321';
+  process.env.SOURCE_HEAD_SHA = 'a'.repeat(40);
+  try {
+    await new Function('require', 'github', 'context', 'core', `return (async () => {\n${script}\n})()`)(
+      require, github, { repo: { owner: 'owner', repo: 'repo' } }, { info() {} },
+    );
+  } finally {
+    process.chdir(previousCwd);
+    if (previousRun === undefined) delete process.env.SOURCE_RUN_ID; else process.env.SOURCE_RUN_ID = previousRun;
+    if (previousSha === undefined) delete process.env.SOURCE_HEAD_SHA; else process.env.SOURCE_HEAD_SHA = previousSha;
+  }
+  assert.ok(created, 'Candidate Registry Issue was not created');
+  for (const section of [scores, evidence, scope, nonGoals]) assert.ok(created.body.includes(section));
+  assert.match(created.body, /## Verification Evidence\nCheck one passed\.\nCheck two passed\./);
+  assert.match(created.body, /## Residual Risk\nRisk line one\.\nRisk line two\./);
+  assert.match(created.body, /## Observation\nObservation line one\.\nObservation line two\./);
+  assert.match(created.body, /## Impact\nImpact line one\.\nImpact line two\./);
+});
 
 test('publisher accepts only a successful trusted review on main', () => {
   const source = workflow();

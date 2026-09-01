@@ -38,14 +38,14 @@ jobs:
                 commit_sha: run.head_sha,
               },
             );
-            const candidates = await Promise.all(associated.map(async ({ number }) => {
+            const mergedPrCandidates = await Promise.all(associated.map(async ({ number }) => {
               const { data: pr } = await github.rest.pulls.get({
                 ...context.repo,
                 pull_number: number,
               });
               return pr;
             }));
-            const matches = candidates.filter((pr) =>
+            const matches = mergedPrCandidates.filter((pr) =>
               pr.head.sha === run.head_sha &&
               pr.base.ref === 'main' &&
               pr.merged === true &&
@@ -102,7 +102,7 @@ jobs:
               sort: 'updated',
               direction: 'desc',
             });
-            const candidates = candidatePage
+            const candidateMemoryEntries = candidatePage
               .filter((issue) => !issue.pull_request)
               .map((issue) => ({
                 number: issue.number,
@@ -113,7 +113,7 @@ jobs:
                   /<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->/,
                 )?.[1] || 'unavailable',
               }));
-            core.setOutput('candidate-memory-json', JSON.stringify(candidates));
+            core.setOutput('candidate-memory-json', JSON.stringify(candidateMemoryEntries));
 
       - name: Check out the merged repository
         uses: actions/checkout@v4
