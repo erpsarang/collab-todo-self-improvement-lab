@@ -71,6 +71,7 @@ test('workflow reads GitHub closing relationships as untrusted, read-only contex
   assert.match(workflow, /if \(references\.pageInfo\.hasNextPage\)/);
   assert.match(workflow, /refusing incomplete verification/);
   assert.match(workflow, /body: String\(body \|\| ''\)\.slice\(0, bodyLimit\)/);
+  assert.match(workflow, /bodyTruncated: String\(body \|\| ''\)\.length > bodyLimit/);
   assert.match(workflow, /CLOSING_ISSUES_JSON: \$\{\{ steps\.merged-pr\.outputs\.closing-issues-json \}\}/);
   assert.doesNotMatch(workflow, /(?:match|regex|RegExp).*Closes/iu);
   assert.doesNotMatch(workflow.match(/^permissions:\n((?:  [^\n]+\n)+)/m)[1], /write/);
@@ -165,6 +166,34 @@ test('closing issue truncation preserves every issue number and title', (t) => {
   assert.match(preparedPrompt, /Closing issue bodies truncated to preserve repository evidence/);
 });
 
+test('API-side closing issue truncation remains visible in prepared context', (t) => {
+  const repository = mkdtempSync(join(tmpdir(), 'self-improvement-api-truncation-'));
+  t.after(() => require('node:fs').rmSync(repository, { recursive: true, force: true }));
+  const runGit = (...args) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' });
+  runGit('init', '--quiet');
+  runGit('config', 'user.name', 'Test User');
+  runGit('config', 'user.email', 'test@example.com');
+  writeFileSync(join(repository, 'evidence.txt'), 'evidence\n');
+  runGit('add', 'evidence.txt');
+  runGit('commit', '--quiet', '-m', 'evidence');
+
+  const preparation = spawnSync(process.execPath, [join(__dirname, '../scripts/self-improvement-review.js'), 'prepare'], {
+    cwd: repository,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CLOSING_ISSUES_JSON: JSON.stringify([
+        { number: 19, title: 'Partially supplied issue', body: 'bounded body', bodyTruncated: true },
+      ]),
+    },
+  });
+
+  assert.equal(preparation.status, 0, preparation.stderr);
+  const preparedPrompt = readFileSync(join(repository, 'self-improvement-prompt.md'), 'utf8');
+  assert.match(preparedPrompt, /Issue #19\nTitle: Partially supplied issue/);
+  assert.match(preparedPrompt, /truncated before the Prepare step; this issue was only partially provided/);
+});
+
 test('workflow uses Codex read-only and publishes only the validated result', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
   assert.match(workflow, /uses: openai\/codex-action@v1/);
@@ -234,6 +263,15 @@ test('verification ignores a Result heading inside a fenced Markdown example', (
   const result = verification().replace(
     'Repository evidence was compared with the issue requirements.',
     'The rejected output looked like:\n```markdown\n# Result\n\nCANDIDATE\n```\nRepository evidence supports the actual result below.',
+  ) + '# Result\n\nNO_CANDIDATE\n\n## Reason\nNo evidence clears the thresholds.';
+
+  assert.match(validate(result), /NO_CANDIDATE/);
+});
+
+test('a shorter matching marker does not close a longer Markdown fence', () => {
+  const result = verification().replace(
+    'Repository evidence was compared with the issue requirements.',
+    'The nested example was:\n````markdown\n```\n# Result\n\nCANDIDATE\n```\n````\nRepository evidence supports the actual result below.',
   ) + '# Result\n\nNO_CANDIDATE\n\n## Reason\nNo evidence clears the thresholds.';
 
   assert.match(validate(result), /NO_CANDIDATE/);
