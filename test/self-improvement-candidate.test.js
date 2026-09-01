@@ -32,9 +32,9 @@ test('publisher preserves complete multiline candidate sections in the registry 
   assert.doesNotThrow(() => new Function(`return async function () {\n${script}\n}`));
 
   const scores = '- Value: 5\n- Breadth: 4\n- Confidence: 5\n- Safety: 4\n- Feasibility: 5\n- Total: 23';
-  const evidence = '- First evidence line\n- Second evidence line';
+  const evidence = '- First evidence line\n```markdown\n## Impact\nExample impact only\n```\n- Second evidence line';
   const scope = '- First scope item\n- Second scope item';
-  const nonGoals = '- First exclusion\n- Second exclusion';
+  const nonGoals = '- First exclusion\n```markdown\n# Result\n\nNO_CANDIDATE\n```\n- Second exclusion';
   const markdown = `# Verification PASS
 ## Verification Target
 Merged implementation
@@ -42,7 +42,8 @@ Merged implementation
 Check one passed.\nCheck two passed.
 ## Residual Risk
 Risk line one.\nRisk line two.
-# Result CANDIDATE
+# Result
+CANDIDATE
 ## Title
 Preserve multiline candidate sections
 ## Observation
@@ -93,6 +94,12 @@ ${nonGoals}`;
   assert.match(created.body, /## Residual Risk\nRisk line one\.\nRisk line two\./);
   assert.match(created.body, /## Observation\nObservation line one\.\nObservation line two\./);
   assert.match(created.body, /## Impact\nImpact line one\.\nImpact line two\./);
+  assert.match(created.body, /## Evidence\n- First evidence line\n```markdown\n## Impact/);
+});
+
+test('publisher gives every source run an independent scheduling opportunity', () => {
+  const source = workflow();
+  assert.doesNotMatch(source, /^concurrency:/m);
 });
 
 test('publisher accepts only a successful trusted review on main', () => {
@@ -123,9 +130,9 @@ test('publisher has minimal write permissions and no repository write access', (
 test('NO_CANDIDATE exits without creating an Issue while CANDIDATE can publish', () => {
   assert.equal(publicationDecision('# Result\n\nNO_CANDIDATE\n\n## Reason\nNone'), 'NO_CANDIDATE');
   assert.equal(publicationDecision('# Result\n\nCANDIDATE\n\n## Title\nSafety'), 'CANDIDATE');
-  assert.equal(publicationDecision('# Result\n\nNO_CANDIDATE\n\n# Result\n\nCANDIDATE'), 'CANDIDATE');
+  assert.equal(publicationDecision('# Result\n\nCANDIDATE\n\n## Non-Goals\n```markdown\n# Result\n\nNO_CANDIDATE\n```'), 'CANDIDATE');
   const source = workflow();
-  assert.ok(source.indexOf("resultMatch[1] === 'NO_CANDIDATE'") < source.indexOf('issues.create({'));
+  assert.ok(source.indexOf("result === 'NO_CANDIDATE'") < source.indexOf('issues.create({'));
 });
 
 test('candidate keys normalize Unicode case and whitespace deterministically', () => {
@@ -140,6 +147,7 @@ test('publisher deduplicates keys and recurrence comments by run ID', () => {
   assert.match(source, /includes\(keyMarker\)/);
   assert.match(source, /if \(existing\)/);
   assert.match(source, /comments\.some.*includes\(runMarker\)/s);
+  assert.match(source, /String\(existing\.body \|\| ''\)\.includes\(runMarker\)/);
   assert.equal(hasRunMarker([{ body: '<!-- self-improvement-review-run: 108 -->' }], 108), true);
   assert.equal(hasRunMarker([], 108), false);
 });

@@ -6,10 +6,23 @@ function candidateKey(title) {
 }
 
 function publicationDecision(markdown) {
-  const matches = [...String(markdown).trim().matchAll(/^# Result\s+(NO_CANDIDATE|CANDIDATE)(?:\s|$)/gmu)];
-  const match = matches.at(-1);
-  if (!match) throw new Error('Validated result has no recognized result');
-  return match[1];
+  const source = String(markdown).trim();
+  let fence = null;
+  for (const line of source.matchAll(/^(.*)(?:\r?\n|$)/gmu)) {
+    const fenceMatch = line[1].match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      const length = fenceMatch[1].length;
+      if (!fence) fence = { marker, length };
+      else if (fence.marker === marker && length >= fence.length && /^\s*$/u.test(fenceMatch[2])) fence = null;
+      continue;
+    }
+    if (!fence && /^# Result\s*$/u.test(line[1])) {
+      const result = source.slice(line.index + line[1].length).trim().match(/^(NO_CANDIDATE|CANDIDATE)(?:\s|$)/u)?.[1];
+      if (result) return result;
+    }
+  }
+  throw new Error('Validated result has no recognized result');
 }
 
 function hasRunMarker(comments, runId) {

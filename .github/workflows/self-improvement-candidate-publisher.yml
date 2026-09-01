@@ -13,9 +13,6 @@ permissions:
   actions: read
   issues: write
 
-concurrency:
-  group: self-improvement-candidate-publisher
-
 jobs:
   publish:
     if: github.event.workflow_run.conclusion == 'success'
@@ -77,27 +74,42 @@ jobs:
             const resultPath = 'candidate-artifact/self-improvement-result.md';
             if (!fs.existsSync(resultPath)) throw new Error('Validated result is missing');
             const markdown = fs.readFileSync(resultPath, 'utf8').trim();
-            const resultMatches = [...markdown.matchAll(/^# Result\s+(NO_CANDIDATE|CANDIDATE)(?:\s|$)/gmu)];
-            const resultMatch = resultMatches.at(-1);
-            if (!resultMatch) throw new Error('Validated result has no recognized result');
-            if (resultMatch[1] === 'NO_CANDIDATE') {
-              core.info('NO_CANDIDATE: no Issue will be created');
-              return;
-            }
-
             const sectionNames = [
               'Verification Target', 'Verification Evidence', 'Residual Risk', 'Title',
               'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals',
             ];
-            // Locate headings once so a section ends only at the next Markdown
-            // heading (or the actual end of the document), never at a line end.
-            const headings = [...markdown.matchAll(/^#{1,2}[ \t]+([^\r\n]+)[ \t]*$/gmu)]
-              .map((match) => ({
-                name: match[1].trim(),
-                level: match[0].startsWith('##') ? 2 : 1,
-                start: match.index,
-                contentStart: match.index + match[0].length,
-              }));
+            // Locate headings once, ignoring example headings inside Markdown
+            // fences. A section ends at the next real heading or document end.
+            const headings = [];
+            let fence = null;
+            for (const line of markdown.matchAll(/^(.*)(?:\r?\n|$)/gmu)) {
+              const fenceMatch = line[1].match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
+              if (fenceMatch) {
+                const marker = fenceMatch[1][0];
+                const length = fenceMatch[1].length;
+                if (!fence) fence = { marker, length };
+                else if (fence.marker === marker && length >= fence.length && /^\s*$/u.test(fenceMatch[2])) fence = null;
+                continue;
+              }
+              if (fence) continue;
+              const headingMatch = line[1].match(/^(#{1,2})[ \t]+([^\r\n]+?)[ \t]*$/u);
+              if (headingMatch) headings.push({
+                name: headingMatch[2].trim(),
+                level: headingMatch[1].length,
+                start: line.index,
+                contentStart: line.index + line[1].length,
+              });
+            }
+            const resultHeading = headings.find(({ level, name }) => level === 1 && name === 'Result');
+            if (!resultHeading) throw new Error('Validated result has no recognized result');
+            const nextTopHeading = headings.find(({ level, start }) => level === 1 && start > resultHeading.start);
+            const result = markdown.slice(resultHeading.contentStart, nextTopHeading?.start ?? markdown.length)
+              .trim().match(/^(NO_CANDIDATE|CANDIDATE)(?:\s|$)/u)?.[1];
+            if (!result) throw new Error('Validated result has no recognized result');
+            if (result === 'NO_CANDIDATE') {
+              core.info('NO_CANDIDATE: no Issue will be created');
+              return;
+            }
             const sections = {};
             for (const name of sectionNames) {
               const headingIndex = headings.findIndex((heading) => heading.level === 2 && heading.name === name);
@@ -146,7 +158,9 @@ jobs:
                 issue_number: existing.number,
                 per_page: 100,
               });
-              if (!comments.some((comment) => String(comment.body || '').includes(runMarker))) {
+              const alreadyRecorded = String(existing.body || '').includes(runMarker) ||
+                comments.some((comment) => String(comment.body || '').includes(runMarker));
+              if (!alreadyRecorded) {
                 await github.rest.issues.createComment({
                   ...context.repo,
                   issue_number: existing.number,
