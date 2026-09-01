@@ -9,6 +9,7 @@ const RAW_OUTPUT = 'self-improvement-raw.md';
 const MAX_CONTEXT_CHARS = 80_000;
 const MAX_CLOSING_ISSUES_CHARS = 10_000;
 const MAX_CANDIDATE_MEMORY_CHARS = 8_000;
+const DECISION_LABELS = ['SI-승인대기', 'SI-승인', 'SI-보류', 'SI-거절'];
 
 function candidateMemory(raw = process.env.CANDIDATE_MEMORY_JSON || '[]') {
   let candidates;
@@ -21,7 +22,10 @@ function candidateMemory(raw = process.env.CANDIDATE_MEMORY_JSON || '[]') {
 
   const entries = candidates.map((candidate) => {
     const labels = Array.isArray(candidate.labels) ? candidate.labels.map(String) : [];
-    const decision = ['SI-승인대기', 'SI-승인', 'SI-보류', 'SI-거절'].find((label) => labels.includes(label)) || 'SI-승인대기';
+    const decisions = DECISION_LABELS.filter((label) => labels.includes(label));
+    const decision = decisions.length === 1
+      ? decisions[0]
+      : `AMBIGUOUS (${decisions.length ? decisions.join(', ') : 'no decision label'})`;
     return [
       `Issue #${String(candidate.number || 'unknown')}`,
       `Title: ${String(candidate.title || '').replace(/^\[Self-Improvement Candidate\]\s*/u, '')}`,

@@ -74,10 +74,8 @@ jobs:
             const resultPath = 'candidate-artifact/self-improvement-result.md';
             if (!fs.existsSync(resultPath)) throw new Error('Validated result is missing');
             const markdown = fs.readFileSync(resultPath, 'utf8').trim();
-            const sectionNames = [
-              'Verification Target', 'Verification Evidence', 'Residual Risk', 'Title',
-              'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals',
-            ];
+            const verificationSectionNames = ['Verification Target', 'Verification Evidence', 'Residual Risk'];
+            const candidateSectionNames = ['Title', 'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals'];
             // Locate headings once, ignoring example headings inside Markdown
             // fences. A section ends at the next real heading or document end.
             const headings = [];
@@ -110,18 +108,29 @@ jobs:
               core.info('NO_CANDIDATE: no Issue will be created');
               return;
             }
-            const sections = {};
-            for (const name of sectionNames) {
-              const headingIndex = headings.findIndex((heading) => heading.level === 2 && heading.name === name);
-              if (headingIndex === -1) {
-                sections[name] = '';
-                continue;
+            const resultHeadingIndex = headings.indexOf(resultHeading);
+            const verificationHeadings = headings.slice(0, resultHeadingIndex);
+            const candidateHeadings = headings.slice(resultHeadingIndex + 1)
+              .filter(({ start }) => !nextTopHeading || start < nextTopHeading.start);
+            const extractSections = (names, regionHeadings, regionEnd) => {
+              const extracted = {};
+              for (const name of names) {
+                const headingIndex = regionHeadings.findIndex((heading) => heading.level === 2 && heading.name === name);
+                if (headingIndex === -1) {
+                  extracted[name] = '';
+                  continue;
+                }
+                const heading = regionHeadings[headingIndex];
+                const nextHeading = regionHeadings.slice(headingIndex + 1).find(({ level }) => level <= 2);
+                extracted[name] = markdown.slice(heading.contentStart, nextHeading?.start ?? regionEnd).trim();
               }
-              const heading = headings[headingIndex];
-              const nextHeading = headings.slice(headingIndex + 1).find(({ level }) => level <= 2);
-              sections[name] = markdown.slice(heading.contentStart, nextHeading?.start ?? markdown.length).trim();
-            }
-            for (const name of sectionNames.slice(3)) {
+              return extracted;
+            };
+            const sections = {
+              ...extractSections(verificationSectionNames, verificationHeadings, resultHeading.start),
+              ...extractSections(candidateSectionNames, candidateHeadings, nextTopHeading?.start ?? markdown.length),
+            };
+            for (const name of candidateSectionNames) {
               if (!sections[name]) throw new Error(`Candidate is missing ${name}`);
             }
             const normalizedTitle = sections.Title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
@@ -145,36 +154,70 @@ jobs:
               }
             }
 
-            const records = await github.paginate(github.rest.issues.listForRepo, {
-              ...context.repo,
-              labels: 'SI-후보',
-              state: 'all',
-              per_page: 100,
-            });
-            const existing = records.find((issue) => !issue.pull_request && String(issue.body || '').includes(keyMarker));
-            if (existing) {
-              const comments = await github.paginate(github.rest.issues.listComments, {
-                ...context.repo,
-                issue_number: existing.number,
-                per_page: 100,
-              });
-              const alreadyRecorded = String(existing.body || '').includes(runMarker) ||
-                comments.some((comment) => String(comment.body || '').includes(runMarker));
-              if (!alreadyRecorded) {
-                await github.rest.issues.createComment({
-                  ...context.repo,
-                  issue_number: existing.number,
-                  body: `${runMarker}\nReobserved by Self-Improvement Review run ${process.env.SOURCE_RUN_ID}.\n\nSource merge SHA: \`${process.env.SOURCE_HEAD_SHA}\``,
-                });
-              }
-              core.info(`Reobserved candidate in Issue #${existing.number}`);
-              return;
-            }
-
             const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${sections.Title}\n\n## Observation\n${sections.Observation}\n\n## Evidence\n${sections.Evidence}\n\n## Impact\n${sections.Impact}\n\n## Scores\n${sections.Scores}\n\n## Suggested Scope\n${sections['Suggested Scope']}\n\n## Non-Goals\n${sections['Non-Goals']}\n\n## Verification Status\n${markdown.match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)/mu)?.[1] || 'UNKNOWN'}\n\n## Verification Target\n${sections['Verification Target'] || 'Not applicable'}\n\n## Verification Evidence\n${sections['Verification Evidence']}\n\n## Residual Risk\n${sections['Residual Risk']}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${process.env.SOURCE_HEAD_SHA}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
-            await github.rest.issues.create({
-              ...context.repo,
-              title: `[Self-Improvement Candidate] ${sections.Title}`,
-              body,
-              labels: ['SI-후보', 'SI-승인대기'],
+            const findMatchingRecords = async () => (await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, labels: 'SI-후보', state: 'all', per_page: 100,
+            })).filter((issue) => !issue.pull_request && String(issue.body || '').includes(keyMarker));
+
+            // Recheck immediately before creation, then reconcile afterward.
+            // Concurrent creators may both win the create race, but every run
+            // deterministically converges the registry on the lowest Issue number.
+            let matching = await findMatchingRecords();
+            if (matching.length === 0) {
+              await github.rest.issues.create({
+                ...context.repo,
+                title: `[Self-Improvement Candidate] ${sections.Title}`,
+                body,
+                labels: ['SI-후보', 'SI-승인대기'],
+              });
+            }
+            matching = await findMatchingRecords();
+            if (matching.length === 0) throw new Error('Candidate record was not visible after publication');
+            matching.sort((left, right) => left.number - right.number);
+            const [canonical, ...duplicates] = matching;
+            const allRecords = [canonical, ...duplicates];
+            const observations = [];
+            for (const record of allRecords) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: record.number, per_page: 100,
+              });
+              observations.push(String(record.body || ''), ...comments.map(({ body }) => String(body || '')));
+            }
+            if (!observations.some((text) => text.includes(runMarker))) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: canonical.number,
+                body: `${runMarker}\nReobserved by Self-Improvement Review run ${process.env.SOURCE_RUN_ID}.\n\nSource merge SHA: \`${process.env.SOURCE_HEAD_SHA}\``,
+              });
+            }
+            const canonicalComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: canonical.number, per_page: 100,
             });
+            let canonicalText = [canonical.body, ...canonicalComments.map(({ body }) => body)].join('\n');
+            const runEntries = new Map();
+            for (const text of observations) {
+              for (const match of text.matchAll(/<!-- self-improvement-review-run: (\d+) -->/gu)) {
+                if (!runEntries.has(match[1])) runEntries.set(match[1], match[0]);
+              }
+            }
+            for (const [runId, marker] of runEntries) {
+              if (canonicalText.includes(marker)) continue;
+              const recurrence = `${marker}\nReconciled observation from duplicate Candidate Registry record (source run ${runId}).`;
+              await github.rest.issues.createComment({ ...context.repo, issue_number: canonical.number, body: recurrence });
+              canonicalText += `\n${recurrence}`;
+            }
+            for (const duplicate of duplicates) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: duplicate.number,
+                body: `Duplicate Candidate Registry record reconciled into canonical Issue #${canonical.number}.`,
+              });
+              await github.rest.issues.removeLabel({
+                ...context.repo, issue_number: duplicate.number, name: 'SI-후보',
+              }).catch((error) => {
+                // Another concurrent reconciler may already have archived it.
+                if (error.status !== 404) throw error;
+              });
+              await github.rest.issues.update({ ...context.repo, issue_number: duplicate.number, state: 'closed' });
+            }
+            core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);

@@ -1,0 +1,40 @@
+name: Self-Improvement Decision Normalizer
+
+on:
+  issues:
+    types:
+      - labeled
+
+# A newly applied human decision is authoritative. This boundary only removes
+# stale decision labels; it cannot inspect or modify repository contents.
+permissions:
+  issues: write
+
+concurrency:
+  group: self-improvement-decision-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  normalize:
+    if: >-
+      contains(fromJSON('["SI-승인대기","SI-승인","SI-보류","SI-거절"]'),
+      github.event.label.name) && contains(github.event.issue.labels.*.name, 'SI-후보')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep only the newly applied human decision
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const decisionLabels = ['SI-승인대기', 'SI-승인', 'SI-보류', 'SI-거절'];
+            const authoritative = context.payload.label.name;
+            if (!decisionLabels.includes(authoritative)) return;
+            if (!context.payload.issue.labels.some(({ name }) => name === 'SI-후보')) return;
+            for (const name of decisionLabels) {
+              if (name === authoritative) continue;
+              if (!context.payload.issue.labels.some((label) => label.name === name)) continue;
+              await github.rest.issues.removeLabel({
+                ...context.repo,
+                issue_number: context.payload.issue.number,
+                name,
+              });
+            }

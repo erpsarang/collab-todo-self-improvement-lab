@@ -42,6 +42,12 @@ Merged implementation
 Check one passed.\nCheck two passed.
 ## Residual Risk
 Risk line one.\nRisk line two.
+## Title
+Verification title must not publish
+## Evidence
+Verification evidence must not publish
+## Impact
+Verification impact must not publish
 # Result
 CANDIDATE
 ## Title
@@ -62,15 +68,21 @@ ${nonGoals}`;
   mkdirSync(join(directory, 'candidate-artifact'));
   writeFileSync(join(directory, 'candidate-artifact/self-improvement-result.md'), markdown);
   let created;
+  const issues = [];
   const github = {
-    paginate: async () => [],
+    paginate: async (method, input) => (await method(input)).data,
     rest: { issues: {
       getLabel: async () => ({}),
       createLabel: async () => ({}),
-      listForRepo: async () => ({ data: [] }),
+      listForRepo: async () => ({ data: issues.filter((issue) => issue.labels.includes('SI-후보')) }),
       listComments: async () => ({ data: [] }),
       createComment: async () => ({}),
-      create: async (input) => { created = input; },
+      removeLabel: async () => ({}),
+      update: async () => ({}),
+      create: async (input) => {
+        created = input;
+        issues.push({ ...input, number: 1 });
+      },
     } },
   };
   const previousCwd = process.cwd();
@@ -89,6 +101,9 @@ ${nonGoals}`;
     if (previousSha === undefined) delete process.env.SOURCE_HEAD_SHA; else process.env.SOURCE_HEAD_SHA = previousSha;
   }
   assert.ok(created, 'Candidate Registry Issue was not created');
+  assert.match(created.title, /Preserve multiline candidate sections/);
+  assert.doesNotMatch(created.title, /Verification title/);
+  assert.doesNotMatch(created.body, /Verification evidence must not publish/);
   for (const section of [scores, evidence, scope, nonGoals]) assert.ok(created.body.includes(section));
   assert.match(created.body, /## Verification Evidence\nCheck one passed\.\nCheck two passed\./);
   assert.match(created.body, /## Residual Risk\nRisk line one\.\nRisk line two\./);
@@ -145,11 +160,135 @@ test('candidate keys normalize Unicode case and whitespace deterministically', (
 test('publisher deduplicates keys and recurrence comments by run ID', () => {
   const source = workflow();
   assert.match(source, /includes\(keyMarker\)/);
-  assert.match(source, /if \(existing\)/);
-  assert.match(source, /comments\.some.*includes\(runMarker\)/s);
-  assert.match(source, /String\(existing\.body \|\| ''\)\.includes\(runMarker\)/);
+  assert.match(source, /matching\.sort\(\(left, right\) => left\.number - right\.number\)/);
+  assert.match(source, /Duplicate Candidate Registry record reconciled/);
   assert.equal(hasRunMarker([{ body: '<!-- self-improvement-review-run: 108 -->' }], 108), true);
   assert.equal(hasRunMarker([], 108), false);
+});
+
+test('concurrent publishers reconcile one canonical key while preserving every source run', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-race-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-result.md'), `# Verification
+PASS
+## Verification Target
+Issue #21
+## Verification Evidence
+Verified.
+## Residual Risk
+None.
+# Result
+CANDIDATE
+## Title
+Concurrent candidate
+## Observation
+Observed.
+## Evidence
+Evidence.
+## Impact
+Impact.
+## Scores
+- User Impact: 3
+- Reliability Impact: 3
+- Collaboration Impact: 1
+- Evidence Strength: 2
+- Urgency: 1
+
+Total: 10/15
+## Suggested Scope
+Reconcile.
+## Non-Goals
+No queue.`);
+
+  const issues = [{
+    number: 99,
+    title: '[Self-Improvement Candidate] Unrelated',
+    body: '<!-- self-improvement-candidate-key: sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff -->',
+    labels: ['SI-후보'],
+    comments: [],
+  }];
+  let initialLists = 0;
+  let releaseInitial;
+  const initialBarrier = new Promise((resolve) => { releaseInitial = resolve; });
+  const api = {
+    getLabel: async () => ({}), createLabel: async () => ({}),
+    listForRepo: async () => {
+      initialLists += 1;
+      if (initialLists <= 2) {
+        if (initialLists === 2) releaseInitial();
+        await initialBarrier;
+      }
+      return { data: issues.filter(({ labels }) => labels.includes('SI-후보')) };
+    },
+    listComments: async ({ issue_number: number }) => ({ data: issues.find((issue) => issue.number === number).comments }),
+    create: async (input) => {
+      const issue = { ...input, number: issues.length + 1, comments: [] };
+      issues.push(issue);
+      return { data: issue };
+    },
+    createComment: async ({ issue_number: number, body }) => {
+      issues.find((issue) => issue.number === number).comments.push({ body });
+    },
+    removeLabel: async ({ issue_number: number, name }) => {
+      const issue = issues.find((candidate) => candidate.number === number);
+      issue.labels = issue.labels.filter((label) => label !== name);
+    },
+    update: async ({ issue_number: number, state }) => { issues.find((issue) => issue.number === number).state = state; },
+  };
+  const github = { paginate: async (method, input) => (await method(input)).data, rest: { issues: api } };
+  const execute = (runId) => new Function('require', 'github', 'context', 'core', 'process',
+    `return (async () => {\n${script}\n})()`)(require, github, { repo: {} }, { info() {} }, {
+      env: { SOURCE_RUN_ID: String(runId), SOURCE_HEAD_SHA: String(runId).padStart(40, '0') },
+    });
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await Promise.all([execute(501), execute(502)]);
+  } finally {
+    process.chdir(previousCwd);
+  }
+  const candidateIssues = issues.filter(({ title }) => title.includes('Concurrent candidate'));
+  const registryRecords = candidateIssues.filter(({ labels }) => labels.includes('SI-후보'));
+  assert.equal(registryRecords.length, 1);
+  assert.equal(registryRecords[0].number, Math.min(...candidateIssues.map(({ number }) => number)));
+  const canonicalHistory = [registryRecords[0].body, ...registryRecords[0].comments.map(({ body }) => body)].join('\n');
+  assert.match(canonicalHistory, /self-improvement-review-run: 501/);
+  assert.match(canonicalHistory, /self-improvement-review-run: 502/);
+  assert.deepEqual(issues.find(({ number }) => number === 99).labels, ['SI-후보']);
+});
+
+test('candidate memory fails closed when decision labels are ambiguous or absent', () => {
+  const memory = candidateMemory(JSON.stringify([
+    { number: 1, title: 'Conflicted', labels: ['SI-승인대기', 'SI-승인'], state: 'open' },
+    { number: 2, title: 'Missing', labels: ['SI-후보'], state: 'open' },
+  ]));
+  assert.match(memory, /Human Decision: AMBIGUOUS \(SI-승인대기, SI-승인\)/);
+  assert.match(memory, /Human Decision: AMBIGUOUS \(no decision label\)/);
+  assert.doesNotMatch(memory, /Human Decision: SI-승인대기\nState: open\n\nIssue #2/);
+});
+
+test('decision normalizer keeps the newly applied human label and has no implementation boundary', async () => {
+  const source = readFileSync(join(__dirname, '../.github/workflows/self-improvement-decision-normalizer.yml'), 'utf8');
+  const script = workflowScript(source, 'Keep only the newly applied human decision');
+  const labels = ['SI-후보', 'SI-승인대기', 'SI-승인'];
+  const removed = [];
+  const github = { rest: { issues: { removeLabel: async ({ name }) => {
+    removed.push(name);
+    labels.splice(labels.indexOf(name), 1);
+  } } } };
+  const context = { repo: {}, payload: { label: { name: 'SI-승인' }, issue: { number: 7, labels: labels.map((name) => ({ name })) } } };
+  await new Function('github', 'context', `return (async () => {\n${script}\n})()`)(github, context);
+  assert.deepEqual(removed, ['SI-승인대기']);
+  assert.deepEqual(labels, ['SI-후보', 'SI-승인']);
+
+  context.payload.label.name = 'SI-보류';
+  context.payload.issue.labels = [...labels, 'SI-보류'].map((name) => ({ name }));
+  await new Function('github', 'context', `return (async () => {\n${script}\n})()`)(github, context);
+  assert.deepEqual(labels, ['SI-후보']);
+  assert.deepEqual(removed, ['SI-승인대기', 'SI-승인']);
+  assert.match(source, /^permissions:\n  issues: write\n/m);
+  assert.doesNotMatch(source, /checkout|codex|OPENAI_API_KEY|contents:|pull-requests:|branches|merge/i);
 });
 
 test('new records receive the registry and pending human-decision labels', () => {
