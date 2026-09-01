@@ -112,9 +112,42 @@ test('large closing issue bodies cannot consume the repository evidence budget',
   assert.equal(preparation.status, 0, preparation.stderr);
   const preparedPrompt = readFileSync(join(repository, 'self-improvement-prompt.md'), 'utf8');
   const context = preparedPrompt.slice(preparedPrompt.indexOf('REPOSITORY CONTEXT\n') + 'REPOSITORY CONTEXT\n'.length);
-  assert.match(context, /Closing issue context truncated to preserve repository evidence/);
+  assert.match(context, /Closing issue bodies truncated to preserve repository evidence/);
   assert.match(context, /===== repository-evidence\.txt =====\nREPOSITORY_EVIDENCE_SURVIVES/);
   assert.ok(context.length <= 80_000);
+});
+
+test('closing issue truncation preserves every issue number and title', (t) => {
+  const repository = mkdtempSync(join(tmpdir(), 'self-improvement-issues-'));
+  t.after(() => require('node:fs').rmSync(repository, { recursive: true, force: true }));
+  const runGit = (...args) => execFileSync('git', ['-C', repository, ...args], { encoding: 'utf8' });
+
+  runGit('init', '--quiet');
+  runGit('config', 'user.name', 'Test User');
+  runGit('config', 'user.email', 'test@example.com');
+  writeFileSync(join(repository, 'evidence.txt'), 'evidence\n');
+  runGit('add', 'evidence.txt');
+  runGit('commit', '--quiet', '-m', 'evidence');
+
+  const issues = [
+    { number: 19, title: 'First verification target', body: 'first body '.repeat(2_000) },
+    { number: 27, title: 'Second verification target', body: 'second body '.repeat(2_000) },
+  ];
+  const preparation = spawnSync(
+    process.execPath,
+    [join(__dirname, '../scripts/self-improvement-review.js'), 'prepare'],
+    {
+      cwd: repository,
+      encoding: 'utf8',
+      env: { ...process.env, CLOSING_ISSUES_JSON: JSON.stringify(issues) },
+    },
+  );
+
+  assert.equal(preparation.status, 0, preparation.stderr);
+  const preparedPrompt = readFileSync(join(repository, 'self-improvement-prompt.md'), 'utf8');
+  assert.match(preparedPrompt, /Issue #19\nTitle: First verification target/);
+  assert.match(preparedPrompt, /Issue #27\nTitle: Second verification target/);
+  assert.match(preparedPrompt, /Closing issue bodies truncated to preserve repository evidence/);
 });
 
 test('workflow uses Codex read-only and publishes only the validated result', () => {
@@ -170,6 +203,16 @@ test('merged diff includes every commit in a multi-commit rebase merge', (t) => 
 
 test('NO_CANDIDATE is a successful review result', () => {
   assert.match(validate(verification() + '# Result\n\nNO_CANDIDATE\n\n## Reason\n\nNo evidence clears the thresholds.'), /NO_CANDIDATE/);
+});
+
+test('verification prose may mention # Result before the anchored result heading', () => {
+  const result = verification().replace(
+    'Repository evidence was compared with the issue requirements.',
+    'Repository evidence confirms that literal `# Result` text is handled safely.',
+  ) + '# Result\n\nNO_CANDIDATE\n\n## Reason\nNo evidence clears the thresholds.';
+
+  assert.match(validate(result), /^# Result$/m);
+  assert.match(validate(result), /NO_CANDIDATE/);
 });
 
 test('verification accepts PASS, CONCERN, and targetless NOT_APPLICABLE', () => {
