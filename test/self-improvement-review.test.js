@@ -67,9 +67,24 @@ test('workflow reads GitHub closing relationships as untrusted, read-only contex
 
   assert.match(workflow, /closingIssuesReferences\(first: 10\)/);
   assert.match(workflow, /nodes \{ number title body \}/);
+  assert.match(workflow, /pageInfo \{ hasNextPage \}/);
+  assert.match(workflow, /if \(references\.pageInfo\.hasNextPage\)/);
+  assert.match(workflow, /refusing incomplete verification/);
+  assert.match(workflow, /body: String\(body \|\| ''\)\.slice\(0, bodyLimit\)/);
   assert.match(workflow, /CLOSING_ISSUES_JSON: \$\{\{ steps\.merged-pr\.outputs\.closing-issues-json \}\}/);
   assert.doesNotMatch(workflow, /(?:match|regex|RegExp).*Closes/iu);
   assert.doesNotMatch(workflow.match(/^permissions:\n((?:  [^\n]+\n)+)/m)[1], /write/);
+});
+
+test('workflow bounds closing issue bodies before passing them between steps', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
+  const bounding = workflow.indexOf('const boundedIssues');
+  const output = workflow.indexOf("core.setOutput('closing-issues-json'");
+
+  assert.ok(bounding > 0 && bounding < output);
+  assert.match(workflow.slice(bounding, output), /body: String\(body \|\| ''\)\.slice/);
+  assert.match(workflow.slice(bounding, output), /number,/);
+  assert.match(workflow.slice(bounding, output), /title,/);
 });
 
 test('prompt verifies requirements before observation and respects issue Non-Goals', () => {
@@ -212,6 +227,15 @@ test('verification prose may mention # Result before the anchored result heading
   ) + '# Result\n\nNO_CANDIDATE\n\n## Reason\nNo evidence clears the thresholds.';
 
   assert.match(validate(result), /^# Result$/m);
+  assert.match(validate(result), /NO_CANDIDATE/);
+});
+
+test('verification ignores a Result heading inside a fenced Markdown example', () => {
+  const result = verification().replace(
+    'Repository evidence was compared with the issue requirements.',
+    'The rejected output looked like:\n```markdown\n# Result\n\nCANDIDATE\n```\nRepository evidence supports the actual result below.',
+  ) + '# Result\n\nNO_CANDIDATE\n\n## Reason\nNo evidence clears the thresholds.';
+
   assert.match(validate(result), /NO_CANDIDATE/);
 });
 

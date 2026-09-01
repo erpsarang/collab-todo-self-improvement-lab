@@ -65,16 +65,31 @@ jobs:
                 repository(owner: $owner, name: $repo) {
                   pullRequest(number: $number) {
                     closingIssuesReferences(first: 10) {
+                      pageInfo { hasNextPage }
                       nodes { number title body }
                     }
                   }
                 }
               }
             `, { owner: context.repo.owner, repo: context.repo.repo, number: pr.number });
-            core.setOutput(
-              'closing-issues-json',
-              JSON.stringify(closingIssues.repository.pullRequest.closingIssuesReferences.nodes),
-            );
+            const references = closingIssues.repository.pullRequest.closingIssuesReferences;
+            if (references.pageInfo.hasNextPage) {
+              throw new Error('More than 10 closing issues are not supported; refusing incomplete verification');
+            }
+
+            // Bound the data before it crosses the step boundary. In particular,
+            // never place GitHub's potentially very large Issue bodies wholesale
+            // in a single environment entry used by the Prepare step.
+            const bodyBudget = 8_000;
+            const bodyLimit = references.nodes.length
+              ? Math.floor(bodyBudget / references.nodes.length)
+              : 0;
+            const boundedIssues = references.nodes.map(({ number, title, body }) => ({
+              number,
+              title,
+              body: String(body || '').slice(0, bodyLimit),
+            }));
+            core.setOutput('closing-issues-json', JSON.stringify(boundedIssues));
 
       - name: Check out the merged repository
         uses: actions/checkout@v4

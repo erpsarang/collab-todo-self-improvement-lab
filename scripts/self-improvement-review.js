@@ -164,9 +164,32 @@ REPOSITORY CONTEXT
 ${context}`;
 }
 
+function resultHeadingIndex(markdown) {
+  const lines = markdown.matchAll(/^(.*)(?:\r?\n|$)/gm);
+  let fence = null;
+
+  for (const line of lines) {
+    const fenceMatch = line[1].match(/^\s*(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      if (!fence) fence = marker;
+      else if (fence === marker) fence = null;
+      continue;
+    }
+    if (!fence && /^# Result\s*$/.test(line[1])) {
+      const suffix = markdown.slice(line.index);
+      if (/^# Result\s+(?:NO_CANDIDATE|CANDIDATE)(?:\s|$)/u.test(suffix)) return line.index;
+    }
+  }
+  return -1;
+}
+
 function validate(result) {
   const normalized = result.trim();
-  const verification = normalized.match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)\s+([\s\S]*?)(?=^# Result\s*$)/mu);
+  const resultStart = resultHeadingIndex(normalized);
+  if (resultStart < 0) throw new Error('Review has an invalid Verification status or structure');
+  const verificationText = normalized.slice(0, resultStart);
+  const verification = verificationText.match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)\s+([\s\S]*)$/u);
   if (!verification) throw new Error('Review has an invalid Verification status or structure');
   const status = verification[1];
   const verificationBody = verification[2];
@@ -185,7 +208,6 @@ function validate(result) {
     throw new Error('Verification has an empty Verification Target section');
   }
 
-  const resultStart = verification[0].length;
   const candidateResult = normalized.slice(resultStart);
   if (/^# Result\s+NO_CANDIDATE\s+## Reason\s+\S[\s\S]*$/u.test(candidateResult)) return normalized + '\n';
   if (!/^# Result\s+CANDIDATE\s+/u.test(candidateResult)) throw new Error('Model returned an unknown result');
