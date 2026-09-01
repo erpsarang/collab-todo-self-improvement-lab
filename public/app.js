@@ -7,7 +7,12 @@ const errorMessage = document.querySelector('#form-error');
 function render(todos) {
   const activeAssignee = list.contains(document.activeElement)
     && document.activeElement.matches('input[data-todo-id]')
-    ? { id: document.activeElement.dataset.todoId, value: document.activeElement.value }
+    ? {
+        id: document.activeElement.dataset.todoId,
+        value: document.activeElement.value,
+        selectionStart: document.activeElement.selectionStart,
+        selectionEnd: document.activeElement.selectionEnd
+      }
     : null;
 
   list.replaceChildren(...todos.map((todo) => {
@@ -40,7 +45,7 @@ function render(todos) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error);
-        await loadTodos();
+        await loadTodos({ fresh: true });
       } catch (error) {
         errorMessage.textContent = error.message;
         assignee.disabled = false;
@@ -67,7 +72,7 @@ function render(todos) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error);
-        await loadTodos();
+        await loadTodos({ fresh: true });
       } catch (error) {
         errorMessage.textContent = error.message;
         status.value = todo.status;
@@ -79,6 +84,7 @@ function render(todos) {
     item.append(details, status);
     return item;
   }));
+  todoRefresh.restoreAssigneeFocus(list.querySelectorAll('input[data-todo-id]'), activeAssignee);
   count.textContent = `${todos.length}개`;
   emptyState.hidden = todos.length > 0;
 }
@@ -105,7 +111,7 @@ form.addEventListener('submit', async (event) => {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
     form.elements.title.value = '';
-    await loadTodos();
+    await loadTodos({ fresh: true });
   } catch (error) {
     errorMessage.textContent = error.message;
   }
