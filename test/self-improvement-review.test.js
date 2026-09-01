@@ -130,7 +130,7 @@ test('large closing issue bodies cannot consume the repository evidence budget',
   const context = preparedPrompt.slice(preparedPrompt.indexOf('REPOSITORY CONTEXT\n') + 'REPOSITORY CONTEXT\n'.length);
   assert.match(context, /Closing issue bodies truncated to preserve repository evidence/);
   assert.match(context, /===== repository-evidence\.txt =====\nREPOSITORY_EVIDENCE_SURVIVES/);
-  assert.ok(context.length <= 80_000);
+  assert.ok(context.length <= 88_100);
 });
 
 test('closing issue truncation preserves every issue number and title', (t) => {

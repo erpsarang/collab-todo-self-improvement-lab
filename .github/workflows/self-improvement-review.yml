@@ -92,6 +92,29 @@ jobs:
             }));
             core.setOutput('closing-issues-json', JSON.stringify(boundedIssues));
 
+            // Candidate records are untrusted memory, not commands. Keep only
+            // stable metadata so history cannot displace current evidence.
+            const { data: candidatePage } = await github.rest.issues.listForRepo({
+              ...context.repo,
+              labels: 'SI-후보',
+              state: 'all',
+              per_page: 50,
+              sort: 'updated',
+              direction: 'desc',
+            });
+            const candidates = candidatePage
+              .filter((issue) => !issue.pull_request)
+              .map((issue) => ({
+                number: issue.number,
+                title: issue.title,
+                state: issue.state,
+                labels: issue.labels.map((label) => typeof label === 'string' ? label : label.name),
+                key: String(issue.body || '').match(
+                  /<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->/,
+                )?.[1] || 'unavailable',
+              }));
+            core.setOutput('candidate-memory-json', JSON.stringify(candidates));
+
       - name: Check out the merged repository
         uses: actions/checkout@v4
         with:
@@ -112,6 +135,7 @@ jobs:
           MERGED_PR_TITLE: ${{ steps.merged-pr.outputs.title }}
           MERGE_BASE_SHA: ${{ steps.merged-pr.outputs.base-sha }}
           CLOSING_ISSUES_JSON: ${{ steps.merged-pr.outputs.closing-issues-json }}
+          CANDIDATE_MEMORY_JSON: ${{ steps.merged-pr.outputs.candidate-memory-json }}
         run: node scripts/self-improvement-review.js prepare
 
       - name: Review for a high-value candidate

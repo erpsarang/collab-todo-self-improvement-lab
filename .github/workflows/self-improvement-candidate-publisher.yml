@@ -1,0 +1,152 @@
+name: Self-Improvement Candidate Publisher
+
+on:
+  workflow_run:
+    workflows:
+      - Self-Improvement Review
+    types:
+      - completed
+
+# Deliberately separate from the read-only reviewer. This workflow can only
+# read its trusted artifact and maintain candidate Issues.
+permissions:
+  actions: read
+  issues: write
+
+concurrency:
+  group: self-improvement-candidate-publisher
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify trusted review run and artifact
+        id: source
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expected = context.payload.workflow_run;
+            if (!Number.isSafeInteger(expected.id) || expected.id <= 0) throw new Error('Invalid source run ID');
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              ...context.repo,
+              run_id: expected.id,
+            });
+            if (run.id !== expected.id || run.name !== 'Self-Improvement Review') {
+              throw new Error('Unexpected source workflow identity');
+            }
+            if (run.path !== '.github/workflows/self-improvement-review.yml') {
+              throw new Error('Unexpected source workflow path');
+            }
+            if (run.event !== 'workflow_run' || run.conclusion !== 'success' || run.head_branch !== 'main') {
+              throw new Error('Source was not a successful trusted main-branch review');
+            }
+            if (!/^[0-9a-f]{40}$/i.test(run.head_sha) || run.head_sha !== expected.head_sha) {
+              throw new Error('Invalid or inconsistent source head SHA');
+            }
+            const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+              ...context.repo,
+              run_id: run.id,
+              name: 'self-improvement-review',
+              per_page: 100,
+            });
+            const exact = artifacts.artifacts.filter((artifact) =>
+              artifact.name === 'self-improvement-review' && !artifact.expired
+            );
+            if (exact.length !== 1) throw new Error(`Expected one validated artifact, found ${exact.length}`);
+            core.setOutput('run-id', String(run.id));
+            core.setOutput('head-sha', run.head_sha);
+
+      - name: Download exact validated review artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: self-improvement-review
+          path: candidate-artifact
+          run-id: ${{ steps.source.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish candidate record
+        uses: actions/github-script@v7
+        env:
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run-id }}
+          SOURCE_HEAD_SHA: ${{ steps.source.outputs.head-sha }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const crypto = require('node:crypto');
+            const resultPath = 'candidate-artifact/self-improvement-result.md';
+            if (!fs.existsSync(resultPath)) throw new Error('Validated result is missing');
+            const markdown = fs.readFileSync(resultPath, 'utf8').trim();
+            const resultMatches = [...markdown.matchAll(/^# Result\s+(NO_CANDIDATE|CANDIDATE)(?:\s|$)/gmu)];
+            const resultMatch = resultMatches.at(-1);
+            if (!resultMatch) throw new Error('Validated result has no recognized result');
+            if (resultMatch[1] === 'NO_CANDIDATE') {
+              core.info('NO_CANDIDATE: no Issue will be created');
+              return;
+            }
+
+            const sectionNames = [
+              'Verification Target', 'Verification Evidence', 'Residual Risk', 'Title',
+              'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals',
+            ];
+            const sections = {};
+            for (const name of sectionNames) {
+              const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const match = markdown.match(new RegExp(`^## ${escaped}\\s*\\n([\\s\\S]*?)(?=^## |^# |\\s*$)`, 'mu'));
+              sections[name] = match?.[1].trim() || '';
+            }
+            for (const name of sectionNames.slice(3)) {
+              if (!sections[name]) throw new Error(`Candidate is missing ${name}`);
+            }
+            const normalizedTitle = sections.Title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
+            const key = `sha256:${crypto.createHash('sha256').update(normalizedTitle).digest('hex')}`;
+            const keyMarker = `<!-- self-improvement-candidate-key: ${key} -->`;
+            const runMarker = `<!-- self-improvement-review-run: ${process.env.SOURCE_RUN_ID} -->`;
+
+            const labels = [
+              ['SI-후보', '5319e7', 'Self-improvement candidate registry record'],
+              ['SI-승인대기', 'd4c5f9', 'Awaiting a human decision'],
+              ['SI-승인', '0e8a16', 'Approved by a human; does not trigger implementation'],
+              ['SI-보류', 'fbca04', 'Deferred by a human'],
+              ['SI-거절', 'b60205', 'Rejected by a human'],
+            ];
+            for (const [name, color, description] of labels) {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({ ...context.repo, name, color, description });
+              }
+            }
+
+            const records = await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo,
+              labels: 'SI-후보',
+              state: 'all',
+              per_page: 100,
+            });
+            const existing = records.find((issue) => !issue.pull_request && String(issue.body || '').includes(keyMarker));
+            if (existing) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo,
+                issue_number: existing.number,
+                per_page: 100,
+              });
+              if (!comments.some((comment) => String(comment.body || '').includes(runMarker))) {
+                await github.rest.issues.createComment({
+                  ...context.repo,
+                  issue_number: existing.number,
+                  body: `${runMarker}\nReobserved by Self-Improvement Review run ${process.env.SOURCE_RUN_ID}.\n\nSource merge SHA: \`${process.env.SOURCE_HEAD_SHA}\``,
+                });
+              }
+              core.info(`Reobserved candidate in Issue #${existing.number}`);
+              return;
+            }
+
+            const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${sections.Title}\n\n## Observation\n${sections.Observation}\n\n## Evidence\n${sections.Evidence}\n\n## Impact\n${sections.Impact}\n\n## Scores\n${sections.Scores}\n\n## Suggested Scope\n${sections['Suggested Scope']}\n\n## Non-Goals\n${sections['Non-Goals']}\n\n## Verification Status\n${markdown.match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)/mu)?.[1] || 'UNKNOWN'}\n\n## Verification Target\n${sections['Verification Target'] || 'Not applicable'}\n\n## Verification Evidence\n${sections['Verification Evidence']}\n\n## Residual Risk\n${sections['Residual Risk']}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${process.env.SOURCE_HEAD_SHA}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
+            await github.rest.issues.create({
+              ...context.repo,
+              title: `[Self-Improvement Candidate] ${sections.Title}`,
+              body,
+              labels: ['SI-후보', 'SI-승인대기'],
+            });
