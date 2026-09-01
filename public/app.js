@@ -5,14 +5,17 @@ const count = document.querySelector('#todo-count');
 const errorMessage = document.querySelector('#form-error');
 
 function render(todos) {
-  const activeAssignee = list.contains(document.activeElement)
-    && document.activeElement.matches('input[data-todo-id]')
+  const focusedControl = list.contains(document.activeElement)
+    && document.activeElement.matches('[data-todo-id][data-control]')
     ? {
         id: document.activeElement.dataset.todoId,
-        value: document.activeElement.value,
+        control: document.activeElement.dataset.control,
         selectionStart: document.activeElement.selectionStart,
         selectionEnd: document.activeElement.selectionEnd
       }
+    : null;
+  const activeAssignee = focusedControl?.control === 'assignee'
+    ? { ...focusedControl, value: document.activeElement.value }
     : null;
 
   list.replaceChildren(...todos.map((todo) => {
@@ -28,10 +31,13 @@ function render(todos) {
     creator.textContent = `만든 사람: ${todo.createdBy}`;
     assigneeLabel.textContent = '담당자';
     assignee.dataset.todoId = todo.id;
+    assignee.dataset.control = 'assignee';
     assignee.value = todoRefresh.assigneeValue(todo, activeAssignee);
     assignee.placeholder = '담당자 이름';
     assignee.setAttribute('aria-label', `${todo.title} 담당자`);
     assignButton.type = 'button';
+    assignButton.dataset.todoId = todo.id;
+    assignButton.dataset.control = 'assign';
     assignButton.textContent = todo.assignedTo ? '담당자 변경' : '담당자 지정';
     assignButton.addEventListener('click', async () => {
       errorMessage.textContent = '';
@@ -53,6 +59,8 @@ function render(todos) {
       }
     });
     status.className = 'status';
+    status.dataset.todoId = todo.id;
+    status.dataset.control = 'status';
     status.setAttribute('aria-label', `${todo.title} 상태`);
     for (const value of ['TODO', 'DOING', 'DONE']) {
       const option = document.createElement('option');
@@ -84,7 +92,10 @@ function render(todos) {
     item.append(details, status);
     return item;
   }));
-  todoRefresh.restoreAssigneeFocus(list.querySelectorAll('input[data-todo-id]'), activeAssignee);
+  todoRefresh.restoreInteractiveFocus(
+    list.querySelectorAll('[data-todo-id][data-control]'),
+    focusedControl
+  );
   count.textContent = `${todos.length}개`;
   emptyState.hidden = todos.length > 0;
 }

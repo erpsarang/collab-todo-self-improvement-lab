@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const {
   assigneeValue,
   createTodoLoader,
-  restoreAssigneeFocus,
+  restoreInteractiveFocus,
   startPeriodicRefresh
 } = require('../public/todo-refresh');
 
@@ -22,11 +22,26 @@ test('restores focus and the caret after replacing an assignee input', () => {
     setSelectionRange: (start, end) => calls.push(['selection', start, end])
   };
 
-  restoreAssigneeFocus([replacement], {
-    id: '1', value: '입력 중', selectionStart: 2, selectionEnd: 4
+  replacement.dataset.control = 'assignee';
+  restoreInteractiveFocus([replacement], {
+    id: '1', control: 'assignee', value: '입력 중', selectionStart: 2, selectionEnd: 4
   });
 
   assert.deepEqual(calls, ['focus', ['selection', 2, 4]]);
+});
+
+test('restores focus to each kind of interactive control after rendering', () => {
+  for (const controlType of ['status', 'assign']) {
+    let focused = false;
+    const replacement = {
+      dataset: { todoId: '1', control: controlType },
+      focus: () => { focused = true; }
+    };
+
+    restoreInteractiveFocus([replacement], { id: '1', control: controlType });
+
+    assert.equal(focused, true, `${controlType} should regain focus`);
+  }
 });
 
 test('periodic refresh applies newly created todos and remote status and assignee changes', async (t) => {
@@ -124,4 +139,35 @@ test('a fresh load waits for an in-flight poll and then fetches server state aga
 
   await Promise.all([poll, afterMutation]);
   assert.deepEqual(rendered, [[{ id: 'stale' }], [{ id: 'updated' }]]);
+});
+
+test('a fresh request during the queued GET causes exactly one additional refresh', async () => {
+  const resolvers = [];
+  let requestCount = 0;
+  const rendered = [];
+  const loadTodos = createTodoLoader(
+    () => {
+      requestCount += 1;
+      return new Promise((resolve) => resolvers.push(resolve));
+    },
+    (todos) => rendered.push(todos)
+  );
+
+  const poll = loadTodos();
+  await new Promise(setImmediate);
+  const afterFirstMutation = loadTodos({ fresh: true });
+  resolvers[0]([{ id: 'before-mutations' }]);
+  await new Promise(setImmediate);
+  assert.equal(requestCount, 2);
+
+  const afterSecondMutation = loadTodos({ fresh: true });
+  const duplicateRequest = loadTodos({ fresh: true });
+  resolvers[1]([{ id: 'after-first-mutation' }]);
+  await new Promise(setImmediate);
+  assert.equal(requestCount, 3);
+  resolvers[2]([{ id: 'after-second-mutation' }]);
+
+  await Promise.all([poll, afterFirstMutation, afterSecondMutation, duplicateRequest]);
+  assert.equal(requestCount, 3);
+  assert.deepEqual(rendered.at(-1), [{ id: 'after-second-mutation' }]);
 });

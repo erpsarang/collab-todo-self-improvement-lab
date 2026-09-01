@@ -6,6 +6,7 @@
   function createTodoLoader(fetchTodos, applyTodos) {
     let inFlight = null;
     let queuedFreshLoad = null;
+    let freshRequested = false;
 
     function startLoad() {
       const request = Promise.resolve()
@@ -26,10 +27,19 @@
       if (!inFlight) return startLoad();
       if (!fresh) return inFlight;
 
+      freshRequested = true;
       if (!queuedFreshLoad) {
-        queuedFreshLoad = inFlight
-          .catch(() => undefined)
-          .then(startLoad)
+        queuedFreshLoad = (async () => {
+          do {
+            const currentRequest = inFlight;
+            if (currentRequest) await currentRequest.catch(() => undefined);
+            // This request begins after every fresh request received so far. A fresh
+            // request received while it is in flight will leave the flag set and
+            // cause exactly one more pass through the loop.
+            freshRequested = false;
+            await startLoad();
+          } while (freshRequested);
+        })()
           .finally(() => {
             queuedFreshLoad = null;
           });
@@ -50,16 +60,18 @@
     return activeAssignee?.id === todo.id ? activeAssignee.value : (todo.assignedTo || '');
   }
 
-  function restoreAssigneeFocus(inputs, activeAssignee) {
-    if (!activeAssignee) return;
-    const input = Array.from(inputs).find(({ dataset }) => dataset.todoId === activeAssignee.id);
-    if (!input) return;
+  function restoreInteractiveFocus(controls, activeControl) {
+    if (!activeControl) return;
+    const control = Array.from(controls).find(({ dataset }) => (
+      dataset.todoId === activeControl.id && dataset.control === activeControl.control
+    ));
+    if (!control) return;
 
-    input.focus();
-    if (activeAssignee.selectionStart !== undefined) {
-      input.setSelectionRange(activeAssignee.selectionStart, activeAssignee.selectionEnd);
+    control.focus();
+    if (activeControl.selectionStart !== undefined && control.setSelectionRange) {
+      control.setSelectionRange(activeControl.selectionStart, activeControl.selectionEnd);
     }
   }
 
-  return { assigneeValue, createTodoLoader, restoreAssigneeFocus, startPeriodicRefresh };
+  return { assigneeValue, createTodoLoader, restoreInteractiveFocus, startPeriodicRefresh };
 }));
