@@ -24,12 +24,18 @@ test('fork-safe review runs after an unprivileged merge gate in trusted context'
   assert.match(workflow, /Merged PR Review Gate/);
   assert.match(
     workflow,
-    /github\.request\(\s*'GET \/repos\/\{owner\}\/\{repo\}\/actions\/runs\/\{run_id\}\/pull_requests'/,
+    /github\.request\(\s*'GET \/repos\/\{owner\}\/\{repo\}\/commits\/\{commit_sha\}\/pulls'/,
   );
+  assert.match(workflow, /commit_sha: run\.head_sha/);
+  assert.doesNotMatch(workflow, /actions\/runs\/\{run_id\}\/pull_requests/);
   assert.doesNotMatch(workflow, /github\.rest\.actions\.listWorkflowRunPullRequests/);
-  assert.match(workflow, /pr\.merged_by\?\.type !== 'User'/);
-  assert.match(workflow, /pr\.merge_commit_sha/);
-  assert.doesNotMatch(workflow, /github\.event\.workflow_run\.head_sha/);
+  assert.match(workflow, /pr\.head\.sha === run\.head_sha/);
+  assert.match(workflow, /pr\.base\.ref === 'main'/);
+  assert.match(workflow, /pr\.merged === true/);
+  assert.match(workflow, /Boolean\(pr\.merge_commit_sha\)/);
+  assert.match(workflow, /pr\.merged_by\?\.type === 'User'/);
+  assert.match(workflow, /matches\.length !== 1/);
+  assert.match(workflow, /github\.rest\.pulls\.get/);
 });
 
 test('trusted review grants only the read permissions required by its APIs', () => {
