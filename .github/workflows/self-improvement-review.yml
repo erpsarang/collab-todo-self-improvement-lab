@@ -110,7 +110,7 @@ jobs:
                 state: issue.state,
                 labels: issue.labels.map((label) => typeof label === 'string' ? label : label.name),
                 key: String(issue.body || '').match(
-                  /<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->/,
+                  /^<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->(?:\r?\n|$)/u,
                 )?.[1] || 'unavailable',
               }));
             core.setOutput('candidate-memory-json', JSON.stringify(candidateMemoryEntries));

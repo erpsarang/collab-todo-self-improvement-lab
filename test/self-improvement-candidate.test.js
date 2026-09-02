@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { readFileSync, mkdirSync, mkdtempSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-const { candidateKey, hasRunMarker, publicationDecision } = require('../scripts/self-improvement-candidate');
+const { candidateKey, candidateKeyFromRegistryBody, hasRunMarker, publicationDecision } = require('../scripts/self-improvement-candidate');
 const { candidateMemory, validatedPublication } = require('../scripts/self-improvement-review');
 
 const workflowPath = join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml');
@@ -310,11 +310,57 @@ test('candidate keys normalize Unicode case and whitespace deterministically', (
 
 test('publisher deduplicates keys and recurrence comments by run ID', () => {
   const source = workflow();
-  assert.match(source, /includes\(keyMarker\)/);
+  assert.match(source, /candidateKeyFromBody\(issue\.body\) === key/);
   assert.match(source, /matching\.sort\(\(left, right\) => left\.number - right\.number\)/);
   assert.match(source, /Duplicate Candidate Registry record reconciled/);
   assert.equal(hasRunMarker([{ body: '<!-- self-improvement-review-run: 108 -->' }], 108), true);
   assert.equal(hasRunMarker([], 108), false);
+});
+
+test('only the leading canonical Candidate Key metadata slot identifies a registry record', () => {
+  const first = candidateKey('First candidate');
+  const quoted = candidateKey('Quoted candidate');
+  assert.equal(candidateKeyFromRegistryBody(`<!-- self-improvement-candidate-key: ${first} -->\n# Record\n\nEvidence quotes:\n<!-- self-improvement-candidate-key: ${quoted} -->`), first);
+  assert.equal(candidateKeyFromRegistryBody(`# Record\n\nEvidence only:\n<!-- self-improvement-candidate-key: ${quoted} -->`), null);
+  assert.equal(candidateKeyFromRegistryBody(` \n<!-- self-improvement-candidate-key: ${quoted} -->`), null);
+  assert.equal(candidateKeyFromRegistryBody('<!-- self-improvement-candidate-key: sha256:not-a-key -->'), null);
+});
+
+test('publisher ignores Candidate Key markers quoted outside the leading metadata slot', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const publication = candidatePublication({ title: 'Quoted candidate' });
+  const wantedKey = candidateKey(publication.title);
+  const otherKey = candidateKey('Different candidate');
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-key-slot-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(publication));
+  const issues = [{
+    number: 1,
+    body: `<!-- self-improvement-candidate-key: ${otherKey} -->\n# Other record\n\n## Evidence\nQuoted text:\n<!-- self-improvement-candidate-key: ${wantedKey} -->`,
+    labels: ['SI-후보'], comments: [],
+  }];
+  const api = {
+    getLabel: async () => ({}), createLabel: async () => ({}),
+    listForRepo: async () => ({ data: issues.filter(({ labels }) => labels.includes('SI-후보')) }),
+    listComments: async ({ issue_number }) => ({ data: issues.find(({ number }) => number === issue_number).comments }),
+    create: async (input) => { issues.push({ ...input, number: 2, comments: [] }); },
+    createComment: async ({ issue_number, body }) => { issues.find(({ number }) => number === issue_number).comments.push({ body }); },
+    removeLabel: async () => {}, update: async () => {},
+  };
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await new Function('require', 'github', 'context', 'core', 'process', `return (async () => {\n${script}\n})()`)(
+      require, { paginate: async (method, input) => (await method(input)).data, rest: { issues: api } },
+      { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: '901' } },
+    );
+  } finally {
+    process.chdir(previousCwd);
+  }
+  assert.equal(issues.length, 2, 'the quoted marker must not cause reconciliation with another Candidate');
+  assert.equal(candidateKeyFromRegistryBody(issues[0].body), otherKey);
+  assert.equal(candidateKeyFromRegistryBody(issues[1].body), wantedKey);
+  assert.deepEqual(issues[0].labels, ['SI-후보']);
 });
 
 test('concurrent publishers reconcile one canonical key while preserving every source run', async () => {
@@ -400,20 +446,38 @@ test('decision normalizer keeps the newly applied human label and has no impleme
   const removed = [];
   const github = { rest: { issues: { removeLabel: async ({ name }) => {
     removed.push(name);
-    labels.splice(labels.indexOf(name), 1);
+    const index = labels.indexOf(name);
+    if (index === -1) throw Object.assign(new Error('Not Found'), { status: 404 });
+    labels.splice(index, 1);
   } } } };
   const context = { repo: {}, payload: { label: { name: 'SI-승인' }, issue: { number: 7, labels: labels.map((name) => ({ name })) } } };
   await new Function('github', 'context', `return (async () => {\n${script}\n})()`)(github, context);
   assert.deepEqual(removed, ['SI-승인대기']);
   assert.deepEqual(labels, ['SI-후보', 'SI-승인']);
 
+  labels.push('SI-보류');
   context.payload.label.name = 'SI-보류';
-  context.payload.issue.labels = [...labels, 'SI-보류'].map((name) => ({ name }));
+  context.payload.issue.labels = ['SI-후보', 'SI-승인대기', 'SI-승인', 'SI-보류'].map((name) => ({ name }));
   await new Function('github', 'context', `return (async () => {\n${script}\n})()`)(github, context);
-  assert.deepEqual(labels, ['SI-후보']);
-  assert.deepEqual(removed, ['SI-승인대기', 'SI-승인']);
+  assert.deepEqual(labels, ['SI-후보', 'SI-보류']);
+  assert.deepEqual(removed, ['SI-승인대기', 'SI-승인대기', 'SI-승인']);
   assert.match(source, /^permissions:\n  issues: write\n/m);
   assert.doesNotMatch(source, /checkout|codex|OPENAI_API_KEY|contents:|pull-requests:|branches|merge/i);
+});
+
+test('decision normalizer fails closed for stale-label removal errors other than 404', async () => {
+  const source = readFileSync(join(__dirname, '../.github/workflows/self-improvement-decision-normalizer.yml'), 'utf8');
+  const script = workflowScript(source, 'Keep only the newly applied human decision');
+  const error = Object.assign(new Error('Rate limited'), { status: 429 });
+  const github = { rest: { issues: { removeLabel: async () => { throw error; } } } };
+  const context = { repo: {}, payload: {
+    label: { name: 'SI-승인' },
+    issue: { number: 8, labels: ['SI-후보', 'SI-승인대기', 'SI-승인'].map((name) => ({ name })) },
+  } };
+  await assert.rejects(
+    new Function('github', 'context', `return (async () => {\n${script}\n})()`)(github, context),
+    /Rate limited/,
+  );
 });
 
 test('new records receive the registry and pending human-decision labels', () => {

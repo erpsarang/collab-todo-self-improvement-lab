@@ -5,6 +5,12 @@ function candidateKey(title) {
   return `sha256:${createHash('sha256').update(normalized).digest('hex')}`;
 }
 
+function candidateKeyFromRegistryBody(body) {
+  return String(body || '').match(
+    /^<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->(?:\r?\n|$)/u,
+  )?.[1] || null;
+}
+
 function publicationDecision(markdown) {
   const source = String(markdown).trim();
   let fence = null;
@@ -30,4 +36,4 @@ function hasRunMarker(comments, runId) {
   return comments.some((comment) => String(comment.body || comment).includes(marker));
 }
 
-module.exports = { candidateKey, hasRunMarker, publicationDecision };
+module.exports = { candidateKey, candidateKeyFromRegistryBody, hasRunMarker, publicationDecision };

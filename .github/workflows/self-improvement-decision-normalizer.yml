@@ -32,9 +32,15 @@ jobs:
             for (const name of decisionLabels) {
               if (name === authoritative) continue;
               if (!context.payload.issue.labels.some((label) => label.name === name)) continue;
-              await github.rest.issues.removeLabel({
-                ...context.repo,
-                issue_number: context.payload.issue.number,
-                name,
-              });
+              try {
+                await github.rest.issues.removeLabel({
+                  ...context.repo,
+                  issue_number: context.payload.issue.number,
+                  name,
+                });
+              } catch (error) {
+                // The event is a snapshot. A concurrent normalizer may already
+                // have removed this stale label, which is the desired state.
+                if (error.status !== 404) throw error;
+              }
             }

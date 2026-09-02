@@ -130,9 +130,12 @@ jobs:
             }
 
             const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${publication.title}\n\n## Observation\n${publication.observation}\n\n## Evidence\n${publication.evidence}\n\n## Impact\n${publication.impact}\n\n## Scores\n${scoresMarkdown}\n\n## Suggested Scope\n${publication.suggestedScope}\n\n## Non-Goals\n${publication.nonGoals}\n\n## Verification Status\n${publication.verificationStatus}\n\n## Verification Target\n${publication.verificationTarget || 'Not applicable'}\n\n## Verification Evidence\n${publication.verificationEvidence}\n\n## Residual Risk\n${publication.residualRisk}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${publication.verifiedMergeSha}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
+            const candidateKeyFromBody = (issueBody) => String(issueBody || '').match(
+              /^<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->(?:\r?\n|$)/u,
+            )?.[1] || null;
             const findMatchingRecords = async () => (await github.paginate(github.rest.issues.listForRepo, {
               ...context.repo, labels: 'SI-후보', state: 'all', per_page: 100,
-            })).filter((issue) => !issue.pull_request && String(issue.body || '').includes(keyMarker));
+            })).filter((issue) => !issue.pull_request && candidateKeyFromBody(issue.body) === key);
 
             // Recheck immediately before creation, then reconcile afterward.
             // Concurrent creators may both win the create race, but every run
