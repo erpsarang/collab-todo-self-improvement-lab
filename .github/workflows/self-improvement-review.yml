@@ -147,12 +147,16 @@ jobs:
           sandbox: read-only
 
       - name: Validate review result
+        env:
+          VERIFIED_MERGE_SHA: ${{ steps.merged-pr.outputs.merge-sha }}
         run: node scripts/self-improvement-review.js validate
 
       - name: Upload review result
         uses: actions/upload-artifact@v4
         with:
           name: self-improvement-review
-          path: self-improvement-result.md
+          path: |
+            self-improvement-result.md
+            self-improvement-publication.json
           if-no-files-found: error
           retention-days: 7

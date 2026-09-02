@@ -66,77 +66,44 @@ jobs:
         uses: actions/github-script@v7
         env:
           SOURCE_RUN_ID: ${{ steps.source.outputs.run-id }}
-          SOURCE_HEAD_SHA: ${{ steps.source.outputs.head-sha }}
         with:
           script: |
             const fs = require('node:fs');
             const crypto = require('node:crypto');
-            const resultPath = 'candidate-artifact/self-improvement-result.md';
-            if (!fs.existsSync(resultPath)) throw new Error('Validated result is missing');
-            const markdown = fs.readFileSync(resultPath, 'utf8').trim();
-            const verificationSectionNames = ['Verification Target', 'Verification Evidence', 'Residual Risk'];
-            const candidateSectionNames = ['Title', 'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals'];
-            // Locate headings once, ignoring example headings inside Markdown
-            // fences. A section ends at the next real heading or document end.
-            const headings = [];
-            let fence = null;
-            for (const line of markdown.matchAll(/^(.*)(?:\r?\n|$)/gmu)) {
-              const fenceMatch = line[1].match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
-              if (fenceMatch) {
-                const marker = fenceMatch[1][0];
-                const length = fenceMatch[1].length;
-                if (!fence) fence = { marker, length };
-                else if (fence.marker === marker && length >= fence.length && /^\s*$/u.test(fenceMatch[2])) fence = null;
-                continue;
-              }
-              if (fence) continue;
-              const headingMatch = line[1].match(/^(#{1,2})[ \t]+([^\r\n]+?)[ \t]*$/u);
-              if (headingMatch) headings.push({
-                name: headingMatch[2].trim(),
-                level: headingMatch[1].length,
-                start: line.index,
-                contentStart: line.index + line[1].length,
-              });
+            const publicationPath = 'candidate-artifact/self-improvement-publication.json';
+            if (!fs.existsSync(publicationPath)) throw new Error('Validated publication metadata is missing');
+            const publication = JSON.parse(fs.readFileSync(publicationPath, 'utf8'));
+            const requiredStrings = [
+              'result', 'verificationStatus', 'verificationEvidence', 'residualRisk', 'verifiedMergeSha',
+            ];
+            if (publication.schemaVersion !== 1 || requiredStrings.some((name) => typeof publication[name] !== 'string' || !publication[name])) {
+              throw new Error('Publication metadata has an invalid schema');
             }
-            const resultHeading = headings.find(({ level, name }) => level === 1 && name === 'Result');
-            if (!resultHeading) throw new Error('Validated result has no recognized result');
-            const nextTopHeading = headings.find(({ level, start }) => level === 1 && start > resultHeading.start);
-            const result = markdown.slice(resultHeading.contentStart, nextTopHeading?.start ?? markdown.length)
-              .trim().match(/^(NO_CANDIDATE|CANDIDATE)(?:\s|$)/u)?.[1];
-            if (!result) throw new Error('Validated result has no recognized result');
-            if (result === 'NO_CANDIDATE') {
+            if (!['PASS', 'CONCERN', 'NOT_APPLICABLE'].includes(publication.verificationStatus) ||
+                !/^[0-9a-f]{40}$/iu.test(publication.verifiedMergeSha)) {
+              throw new Error('Publication metadata has invalid verification provenance');
+            }
+            if (publication.result === 'NO_CANDIDATE') {
               core.info('NO_CANDIDATE: no Issue will be created');
               return;
             }
-            const resultHeadingIndex = headings.indexOf(resultHeading);
-            const verificationHeadings = headings.slice(0, resultHeadingIndex);
-            const candidateHeadings = headings.slice(resultHeadingIndex + 1)
-              .filter(({ start }) => !nextTopHeading || start < nextTopHeading.start);
-            const extractSections = (names, regionHeadings, regionEnd) => {
-              const extracted = {};
-              for (const name of names) {
-                const headingIndex = regionHeadings.findIndex((heading) => heading.level === 2 && heading.name === name);
-                if (headingIndex === -1) {
-                  extracted[name] = '';
-                  continue;
-                }
-                const heading = regionHeadings[headingIndex];
-                const nextHeading = regionHeadings.slice(headingIndex + 1).find(({ level }) => level <= 2);
-                extracted[name] = markdown.slice(heading.contentStart, nextHeading?.start ?? regionEnd).trim();
-              }
-              return extracted;
-            };
-            const sections = {
-              ...extractSections(verificationSectionNames, verificationHeadings, resultHeading.start),
-              ...extractSections(candidateSectionNames, candidateHeadings, nextTopHeading?.start ?? markdown.length),
-            };
-            for (const name of candidateSectionNames) {
-              if (!sections[name]) throw new Error(`Candidate is missing ${name}`);
+            if (publication.result !== 'CANDIDATE') throw new Error('Publication metadata has an invalid result');
+            const candidateStrings = ['title', 'observation', 'evidence', 'impact', 'suggestedScope', 'nonGoals'];
+            if (candidateStrings.some((name) => typeof publication[name] !== 'string' || !publication[name]) ||
+                !publication.scores || !Number.isInteger(publication.total)) {
+              throw new Error('Candidate publication metadata is incomplete');
             }
-            const normalizedTitle = sections.Title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
+            const normalizedTitle = publication.title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
             const key = `sha256:${crypto.createHash('sha256').update(normalizedTitle).digest('hex')}`;
             const keyMarker = `<!-- self-improvement-candidate-key: ${key} -->`;
             const runMarker = `<!-- self-improvement-review-run: ${process.env.SOURCE_RUN_ID} -->`;
+            const scoreNames = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
+            if (scoreNames.some((name) => !Number.isInteger(publication.scores[name]) || publication.scores[name] < 0 || publication.scores[name] > 3) ||
+                scoreNames.reduce((sum, name) => sum + publication.scores[name], 0) !== publication.total) {
+              throw new Error('Candidate publication scores are invalid');
+            }
+            const scoresMarkdown = scoreNames.map((name) => `- ${name}: ${publication.scores[name]}`).join('\n') +
+              `\n\nTotal: ${publication.total}/15`;
 
             const labels = [
               ['SI-후보', '5319e7', 'Self-improvement candidate registry record'],
@@ -154,7 +121,7 @@ jobs:
               }
             }
 
-            const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${sections.Title}\n\n## Observation\n${sections.Observation}\n\n## Evidence\n${sections.Evidence}\n\n## Impact\n${sections.Impact}\n\n## Scores\n${sections.Scores}\n\n## Suggested Scope\n${sections['Suggested Scope']}\n\n## Non-Goals\n${sections['Non-Goals']}\n\n## Verification Status\n${markdown.match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)/mu)?.[1] || 'UNKNOWN'}\n\n## Verification Target\n${sections['Verification Target'] || 'Not applicable'}\n\n## Verification Evidence\n${sections['Verification Evidence']}\n\n## Residual Risk\n${sections['Residual Risk']}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${process.env.SOURCE_HEAD_SHA}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
+            const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${publication.title}\n\n## Observation\n${publication.observation}\n\n## Evidence\n${publication.evidence}\n\n## Impact\n${publication.impact}\n\n## Scores\n${scoresMarkdown}\n\n## Suggested Scope\n${publication.suggestedScope}\n\n## Non-Goals\n${publication.nonGoals}\n\n## Verification Status\n${publication.verificationStatus}\n\n## Verification Target\n${publication.verificationTarget || 'Not applicable'}\n\n## Verification Evidence\n${publication.verificationEvidence}\n\n## Residual Risk\n${publication.residualRisk}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${publication.verifiedMergeSha}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
             const findMatchingRecords = async () => (await github.paginate(github.rest.issues.listForRepo, {
               ...context.repo, labels: 'SI-후보', state: 'all', per_page: 100,
             })).filter((issue) => !issue.pull_request && String(issue.body || '').includes(keyMarker));
@@ -166,7 +133,7 @@ jobs:
             if (matching.length === 0) {
               await github.rest.issues.create({
                 ...context.repo,
-                title: `[Self-Improvement Candidate] ${sections.Title}`,
+                title: `[Self-Improvement Candidate] ${publication.title}`,
                 body,
                 labels: ['SI-후보', 'SI-승인대기'],
               });
@@ -187,7 +154,7 @@ jobs:
               await github.rest.issues.createComment({
                 ...context.repo,
                 issue_number: canonical.number,
-                body: `${runMarker}\nReobserved by Self-Improvement Review run ${process.env.SOURCE_RUN_ID}.\n\nSource merge SHA: \`${process.env.SOURCE_HEAD_SHA}\``,
+                body: `${runMarker}\nReobserved by Self-Improvement Review run ${process.env.SOURCE_RUN_ID}.\n\nSource merge SHA: \`${publication.verifiedMergeSha}\``,
               });
             }
             const canonicalComments = await github.paginate(github.rest.issues.listComments, {

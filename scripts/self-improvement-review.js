@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 const { execFileSync } = require('node:child_process');
-const { readFileSync, writeFileSync } = require('node:fs');
+const { readFileSync, rmSync, writeFileSync } = require('node:fs');
 
 const OUTPUT = 'self-improvement-result.md';
 const PROMPT = 'self-improvement-prompt.md';
 const RAW_OUTPUT = 'self-improvement-raw.md';
+const PUBLICATION = 'self-improvement-publication.json';
 const MAX_CONTEXT_CHARS = 80_000;
 const MAX_CLOSING_ISSUES_CHARS = 10_000;
 const MAX_CANDIDATE_MEMORY_CHARS = 8_000;
@@ -230,47 +231,74 @@ function resultHeadingIndex(markdown) {
   return -1;
 }
 
-function validate(result) {
+function structuralHeadings(markdown) {
+  const headings = [];
+  let fence = null;
+  for (const line of markdown.matchAll(/^(.*)(?:\r?\n|$)/gmu)) {
+    const fenceMatch = line[1].match(/^ {0,3}(`{3,}|~{3,})(.*)$/u);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      const length = fenceMatch[1].length;
+      if (!fence) fence = { marker, length };
+      else if (fence.marker === marker && length >= fence.length && /^\s*$/u.test(fenceMatch[2])) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    const match = line[1].match(/^(#{1,2})[ \t]+([^\r\n]+?)[ \t]*$/u);
+    if (match) headings.push({ name: match[2].trim(), level: match[1].length, start: line.index, contentStart: line.index + line[1].length });
+  }
+  return headings;
+}
+
+function extractSections(markdown, headings, start, end) {
+  const region = headings.filter((heading) => heading.level === 2 && heading.start > start && heading.start < end);
+  return new Map(region.map((heading, index) => [
+    heading.name,
+    markdown.slice(heading.contentStart, region[index + 1]?.start ?? end).trim(),
+  ]));
+}
+
+function validatedPublication(result, verifiedMergeSha) {
   const normalized = result.trim();
+  if (!/^[0-9a-f]{40}$/iu.test(verifiedMergeSha || '')) throw new Error('Verified merge SHA is invalid');
   const resultStart = resultHeadingIndex(normalized);
   if (resultStart < 0) throw new Error('Review has an invalid Verification status or structure');
-  const verificationText = normalized.slice(0, resultStart);
-  const verification = verificationText.match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)\s+([\s\S]*)$/u);
-  if (!verification) throw new Error('Review has an invalid Verification status or structure');
-  const status = verification[1];
-  const verificationBody = verification[2];
-  const verificationHeadings = [...verificationBody.matchAll(/^## ([^\r\n]+?)[ \t]*$/gm)];
-  const verificationSections = new Map(verificationHeadings.map((match, index) => [
-    match[1],
-    verificationBody.slice(match.index + match[0].length, verificationHeadings[index + 1]?.index ?? verificationBody.length),
-  ]));
-  for (const heading of ['Verification Evidence', 'Residual Risk']) {
-    if (!verificationSections.has(heading) || !/\S/u.test(verificationSections.get(heading))) {
-      throw new Error(`Verification has an empty ${heading} section`);
-    }
+  const headings = structuralHeadings(normalized);
+  const resultHeading = headings.find(({ level, start }) => level === 1 && start === resultStart);
+  const nextTop = headings.find(({ level, start }) => level === 1 && start > resultStart);
+  const resultEnd = nextTop?.start ?? normalized.length;
+  const verificationMatch = normalized.slice(0, resultStart).match(/^# Verification\s+(PASS|CONCERN|NOT_APPLICABLE)(?:\s|$)/u);
+  if (!verificationMatch) throw new Error('Review has an invalid Verification status or structure');
+  const verification = extractSections(normalized, headings, -1, resultStart);
+  for (const name of ['Verification Evidence', 'Residual Risk']) {
+    if (!verification.get(name)) throw new Error(`Verification has an empty ${name} section`);
   }
-  if (status !== 'NOT_APPLICABLE' &&
-      (!verificationSections.has('Verification Target') || !/\S/u.test(verificationSections.get('Verification Target')))) {
+  if (verificationMatch[1] !== 'NOT_APPLICABLE' && !verification.get('Verification Target')) {
     throw new Error('Verification has an empty Verification Target section');
   }
-
-  const candidateResult = normalized.slice(resultStart);
-  if (/^# Result\s+NO_CANDIDATE\s+## Reason\s+\S[\s\S]*$/u.test(candidateResult)) return normalized + '\n';
-  if (!/^# Result\s+CANDIDATE\s+/u.test(candidateResult)) throw new Error('Model returned an unknown result');
-
-  const requiredSections = ['Title', 'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals'];
-  const headings = [...candidateResult.matchAll(/^## ([^\r\n]+?)[ \t]*$/gm)];
-  const sections = new Map(headings.map((match, index) => [
-    match[1],
-    candidateResult.slice(match.index + match[0].length, headings[index + 1]?.index ?? candidateResult.length),
-  ]));
-  for (const heading of requiredSections) {
-    if (!sections.has(heading)) throw new Error(`Candidate is missing ${heading}`);
-    if (!/\S/u.test(sections.get(heading))) throw new Error(`Candidate has an empty ${heading} section`);
+  const resultKind = normalized.slice(resultHeading.contentStart, resultEnd).trim()
+    .match(/^(NO_CANDIDATE|CANDIDATE)(?:\s|$)/u)?.[1];
+  if (!resultKind) throw new Error('Model returned an unknown result');
+  const base = {
+    schemaVersion: 1,
+    result: resultKind,
+    verificationStatus: verificationMatch[1],
+    verificationTarget: verification.get('Verification Target') || null,
+    verificationEvidence: verification.get('Verification Evidence'),
+    residualRisk: verification.get('Residual Risk'),
+    verifiedMergeSha,
+  };
+  if (resultKind === 'NO_CANDIDATE') {
+    const sections = extractSections(normalized, headings, resultStart, resultEnd);
+    if (!sections.get('Reason')) throw new Error('NO_CANDIDATE has an empty Reason section');
+    return base;
   }
-  const labels = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
-  const scores = Object.fromEntries(labels.map((label) => {
-    const match = candidateResult.match(new RegExp(`- ${label}: ([0-3])(?:\\s|$)`));
+  const sections = extractSections(normalized, headings, resultStart, resultEnd);
+  const fields = ['Title', 'Observation', 'Evidence', 'Impact', 'Scores', 'Suggested Scope', 'Non-Goals'];
+  for (const name of fields) if (!sections.get(name)) throw new Error(`Candidate has an empty ${name} section`);
+  const scoreLabels = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
+  const scores = Object.fromEntries(scoreLabels.map((label) => {
+    const match = sections.get('Scores').match(new RegExp(`^- ${label}: ([0-3])(?:\\s|$)`, 'mu'));
     if (!match) throw new Error(`Candidate has an invalid ${label} score`);
     return [label, Number(match[1])];
   }));
@@ -278,8 +306,18 @@ function validate(result) {
   if (total < 9 || scores['Evidence Strength'] < 2 || Math.max(scores['User Impact'], scores['Reliability Impact'], scores['Collaboration Impact']) < 3) {
     throw new Error('Candidate does not meet the value and evidence thresholds');
   }
-  if (!candidateResult.includes(`Total: ${total}/15`)) throw new Error('Candidate total does not match its scores');
-  return normalized + '\n';
+  if (!sections.get('Scores').includes(`Total: ${total}/15`)) throw new Error('Candidate total does not match its scores');
+  return {
+    ...base,
+    title: sections.get('Title'), observation: sections.get('Observation'), evidence: sections.get('Evidence'),
+    impact: sections.get('Impact'), scores, total, suggestedScope: sections.get('Suggested Scope'),
+    nonGoals: sections.get('Non-Goals'),
+  };
+}
+
+function validate(result) {
+  validatedPublication(result, '0'.repeat(40));
+  return result.trim() + '\n';
 }
 
 function main(command = process.argv[2]) {
@@ -288,9 +326,14 @@ function main(command = process.argv[2]) {
     return;
   }
   if (command === 'validate') {
+    // Never leave a publication source from an earlier validation attempt.
+    rmSync(OUTPUT, { force: true });
+    rmSync(PUBLICATION, { force: true });
     const result = readFileSync(RAW_OUTPUT, 'utf8');
     if (!/\S/u.test(result)) throw new Error('Codex returned no review text');
-    writeFileSync(OUTPUT, validate(result), 'utf8');
+    const publication = validatedPublication(result, process.env.VERIFIED_MERGE_SHA);
+    writeFileSync(OUTPUT, result.trim() + '\n', 'utf8');
+    writeFileSync(PUBLICATION, JSON.stringify(publication, null, 2) + '\n', 'utf8');
     return;
   }
   throw new Error('Usage: self-improvement-review.js <prepare|validate>');
@@ -305,4 +348,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { candidateMemory, readMergedDiff, validate };
+module.exports = { candidateMemory, readMergedDiff, validate, validatedPublication };

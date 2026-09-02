@@ -4,7 +4,7 @@ const { readFileSync, mkdirSync, mkdtempSync, writeFileSync } = require('node:fs
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { candidateKey, hasRunMarker, publicationDecision } = require('../scripts/self-improvement-candidate');
-const { candidateMemory } = require('../scripts/self-improvement-review');
+const { candidateMemory, validatedPublication } = require('../scripts/self-improvement-review');
 
 const workflowPath = join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml');
 const workflow = () => readFileSync(workflowPath, 'utf8');
@@ -17,6 +17,19 @@ function workflowScript(source, stepName) {
     .split('\n').map((line) => line.startsWith('            ') ? line.slice(12) : line).join('\n');
 }
 
+function candidatePublication(overrides = {}) {
+  return {
+    schemaVersion: 1, result: 'CANDIDATE', verificationStatus: 'PASS', verificationTarget: 'Merged implementation',
+    verificationEvidence: 'Check one passed.\nCheck two passed.', residualRisk: 'Risk line one.\nRisk line two.',
+    verifiedMergeSha: 'b'.repeat(40), title: 'Preserve multiline candidate sections',
+    observation: 'Observation line one.\nObservation line two.', evidence: '- First evidence line\n- Second evidence line',
+    impact: 'Impact line one.\nImpact line two.',
+    scores: { 'User Impact': 3, 'Reliability Impact': 3, 'Collaboration Impact': 1, 'Evidence Strength': 2, Urgency: 1 },
+    total: 10, suggestedScope: '- First scope item\n- Second scope item', nonGoals: '- First exclusion\n- Second exclusion',
+    ...overrides,
+  };
+}
+
 test('review workflow GitHub Script parses without duplicate candidate bindings', () => {
   const source = readFileSync(join(__dirname, '../.github/workflows/self-improvement-review.yml'), 'utf8');
   const script = workflowScript(source, 'Verify the human-merged pull request');
@@ -26,47 +39,18 @@ test('review workflow GitHub Script parses without duplicate candidate bindings'
   assert.match(script, /const candidateMemoryEntries\b/);
 });
 
-test('publisher preserves complete multiline candidate sections in the registry Issue body', async () => {
+test('publisher preserves validated multiline metadata in the registry Issue body', async () => {
   const source = workflow();
   const script = workflowScript(source, 'Publish candidate record');
   assert.doesNotThrow(() => new Function(`return async function () {\n${script}\n}`));
 
-  const scores = '- Value: 5\n- Breadth: 4\n- Confidence: 5\n- Safety: 4\n- Feasibility: 5\n- Total: 23';
+  const scores = '- User Impact: 3\n- Reliability Impact: 3\n- Collaboration Impact: 1\n- Evidence Strength: 2\n- Urgency: 1\n\nTotal: 10/15';
   const evidence = '- First evidence line\n```markdown\n## Impact\nExample impact only\n```\n- Second evidence line';
   const scope = '- First scope item\n- Second scope item';
   const nonGoals = '- First exclusion\n```markdown\n# Result\n\nNO_CANDIDATE\n```\n- Second exclusion';
-  const markdown = `# Verification PASS
-## Verification Target
-Merged implementation
-## Verification Evidence
-Check one passed.\nCheck two passed.
-## Residual Risk
-Risk line one.\nRisk line two.
-## Title
-Verification title must not publish
-## Evidence
-Verification evidence must not publish
-## Impact
-Verification impact must not publish
-# Result
-CANDIDATE
-## Title
-Preserve multiline candidate sections
-## Observation
-Observation line one.\nObservation line two.
-## Evidence
-${evidence}
-## Impact
-Impact line one.\nImpact line two.
-## Scores
-${scores}
-## Suggested Scope
-${scope}
-## Non-Goals
-${nonGoals}`;
   const directory = mkdtempSync(join(tmpdir(), 'candidate-publisher-'));
   mkdirSync(join(directory, 'candidate-artifact'));
-  writeFileSync(join(directory, 'candidate-artifact/self-improvement-result.md'), markdown);
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(candidatePublication({ evidence, suggestedScope: scope, nonGoals })));
   let created;
   const issues = [];
   const github = {
@@ -87,10 +71,8 @@ ${nonGoals}`;
   };
   const previousCwd = process.cwd();
   const previousRun = process.env.SOURCE_RUN_ID;
-  const previousSha = process.env.SOURCE_HEAD_SHA;
   process.chdir(directory);
   process.env.SOURCE_RUN_ID = '321';
-  process.env.SOURCE_HEAD_SHA = 'a'.repeat(40);
   try {
     await new Function('require', 'github', 'context', 'core', `return (async () => {\n${script}\n})()`)(
       require, github, { repo: { owner: 'owner', repo: 'repo' } }, { info() {} },
@@ -98,12 +80,9 @@ ${nonGoals}`;
   } finally {
     process.chdir(previousCwd);
     if (previousRun === undefined) delete process.env.SOURCE_RUN_ID; else process.env.SOURCE_RUN_ID = previousRun;
-    if (previousSha === undefined) delete process.env.SOURCE_HEAD_SHA; else process.env.SOURCE_HEAD_SHA = previousSha;
   }
   assert.ok(created, 'Candidate Registry Issue was not created');
   assert.match(created.title, /Preserve multiline candidate sections/);
-  assert.doesNotMatch(created.title, /Verification title/);
-  assert.doesNotMatch(created.body, /Verification evidence must not publish/);
   for (const section of [scores, evidence, scope, nonGoals]) assert.ok(created.body.includes(section));
   assert.match(created.body, /## Verification Evidence\nCheck one passed\.\nCheck two passed\./);
   assert.match(created.body, /## Residual Risk\nRisk line one\.\nRisk line two\./);
@@ -131,9 +110,80 @@ test('publisher accepts only a successful trusted review on main', () => {
 test('publisher uses only the exact validated artifact', () => {
   const source = workflow();
   assert.match(source, /artifact\.name === 'self-improvement-review'/);
-  assert.match(source, /candidate-artifact\/self-improvement-result\.md/);
+  assert.match(source, /candidate-artifact\/self-improvement-publication\.json/);
+  assert.doesNotMatch(source, /candidate-artifact\/self-improvement-result\.md|# Result|structuralHeadings/);
   assert.doesNotMatch(source, /self-improvement-raw\.md/);
   assert.doesNotMatch(source, /actions\/checkout|npm (?:install|test)|OPENAI_API_KEY|codex-action/);
+});
+
+test('validator publication metadata preserves its recognized result and trusted merge SHA', () => {
+  const markdown = `# Verification
+PASS
+## Verification Target
+Issue #21
+## Verification Evidence
+Diagnostic output included a rejected structural heading:
+# Result
+INVALID
+\`\`\`markdown
+## Evidence
+fenced example
+# Result
+NO_CANDIDATE
+\`\`\`
+The actual validated result follows.
+## Residual Risk
+None.
+# Result
+CANDIDATE
+## Title
+Structured publication
+## Observation
+Line one.\nLine two.
+## Evidence
+Evidence one.\nEvidence two.
+## Impact
+Impact one.\nImpact two.
+## Scores
+- User Impact: 3
+- Reliability Impact: 3
+- Collaboration Impact: 1
+- Evidence Strength: 2
+- Urgency: 1
+
+Total: 10/15
+## Suggested Scope
+Scope one.\nScope two.
+## Non-Goals
+Non-goal one.\nNon-goal two.`;
+  const mergeSha = 'c'.repeat(40);
+  const publication = validatedPublication(markdown, mergeSha);
+  assert.equal(publication.result, 'CANDIDATE');
+  assert.equal(publication.verifiedMergeSha, mergeSha);
+  assert.equal(publication.evidence, 'Evidence one.\nEvidence two.');
+  assert.equal(publication.suggestedScope, 'Scope one.\nScope two.');
+  assert.equal(publication.nonGoals, 'Non-goal one.\nNon-goal two.');
+  assert.match(publication.verificationEvidence, /# Result\nINVALID/);
+});
+
+test('NO_CANDIDATE metadata makes the publisher return before Issue APIs', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const directory = mkdtempSync(join(tmpdir(), 'no-candidate-publisher-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify({
+    schemaVersion: 1, result: 'NO_CANDIDATE', verificationStatus: 'PASS', verificationTarget: 'Issue #21',
+    verificationEvidence: 'Verified.', residualRisk: 'None.', verifiedMergeSha: 'd'.repeat(40),
+  }));
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await new Function('require', 'github', 'context', 'core', 'process', `return (async () => {\n${script}\n})()`)(
+      require, { rest: { issues: new Proxy({}, { get() { throw new Error('Issue API must not be used'); } }) } },
+      { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: '10' } },
+    );
+  } finally {
+    process.chdir(previousCwd);
+  }
 });
 
 test('publisher has minimal write permissions and no repository write access', () => {
@@ -170,36 +220,10 @@ test('concurrent publishers reconcile one canonical key while preserving every s
   const script = workflowScript(workflow(), 'Publish candidate record');
   const directory = mkdtempSync(join(tmpdir(), 'candidate-race-'));
   mkdirSync(join(directory, 'candidate-artifact'));
-  writeFileSync(join(directory, 'candidate-artifact/self-improvement-result.md'), `# Verification
-PASS
-## Verification Target
-Issue #21
-## Verification Evidence
-Verified.
-## Residual Risk
-None.
-# Result
-CANDIDATE
-## Title
-Concurrent candidate
-## Observation
-Observed.
-## Evidence
-Evidence.
-## Impact
-Impact.
-## Scores
-- User Impact: 3
-- Reliability Impact: 3
-- Collaboration Impact: 1
-- Evidence Strength: 2
-- Urgency: 1
-
-Total: 10/15
-## Suggested Scope
-Reconcile.
-## Non-Goals
-No queue.`);
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(candidatePublication({
+    verificationTarget: 'Issue #21', verificationEvidence: 'Verified.', residualRisk: 'None.', title: 'Concurrent candidate',
+    observation: 'Observed.', evidence: 'Evidence.', impact: 'Impact.', suggestedScope: 'Reconcile.', nonGoals: 'No queue.',
+  })));
 
   const issues = [{
     number: 99,
@@ -239,7 +263,7 @@ No queue.`);
   const github = { paginate: async (method, input) => (await method(input)).data, rest: { issues: api } };
   const execute = (runId) => new Function('require', 'github', 'context', 'core', 'process',
     `return (async () => {\n${script}\n})()`)(require, github, { repo: {} }, { info() {} }, {
-      env: { SOURCE_RUN_ID: String(runId), SOURCE_HEAD_SHA: String(runId).padStart(40, '0') },
+      env: { SOURCE_RUN_ID: String(runId) },
     });
   const previousCwd = process.cwd();
   process.chdir(directory);

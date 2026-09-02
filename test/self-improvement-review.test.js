@@ -201,7 +201,9 @@ test('workflow uses Codex read-only and publishes only the validated result', ()
   assert.match(workflow, /sandbox: read-only/);
   assert.match(workflow, /output-file: self-improvement-raw\.md/);
   assert.match(workflow, /node scripts\/self-improvement-review\.js validate/);
-  assert.match(workflow, /path: self-improvement-result\.md/);
+  assert.match(workflow, /self-improvement-result\.md/);
+  assert.match(workflow, /self-improvement-publication\.json/);
+  assert.match(workflow, /VERIFIED_MERGE_SHA: \$\{\{ steps\.merged-pr\.outputs\.merge-sha \}\}/);
   assert.doesNotMatch(workflow, /models\.github\.ai|models: read/);
   assert.doesNotMatch(workflow, /path: self-improvement-raw\.md/);
 });
@@ -219,6 +221,7 @@ test('an invalid raw Codex result does not create the artifact file', (t) => {
 
   assert.notEqual(validation.status, 0);
   assert.equal(existsSync(join(directory, 'self-improvement-result.md')), false);
+  assert.equal(existsSync(join(directory, 'self-improvement-publication.json')), false);
 });
 
 test('merged diff includes every commit in a multi-commit rebase merge', (t) => {
