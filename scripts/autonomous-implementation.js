@@ -3,6 +3,7 @@
 const { createHash } = require('node:crypto');
 const { readFileSync, writeFileSync } = require('node:fs');
 const { candidateKey } = require('./self-improvement-candidate');
+const { isTrustedTestPath, verifyTrustedTests } = require('./verify-trusted-tests');
 
 const SHA = /^[0-9a-f]{40}$/iu;
 const KEY = /^sha256:[0-9a-f]{64}$/u;
@@ -37,25 +38,6 @@ function eligibility(dispatch, issue, trustedMainSha) {
 function implementationMarker(key) {
   if (!KEY.test(key)) throw new Error('Invalid Candidate Key');
   return `<!-- autonomous-implementation-candidate-key: ${key} -->`;
-}
-
-function isTrustedTestPath(path) {
-  return /(^|\/)(?:test|tests|__tests__)(?:\/|$)/u.test(path) ||
-    /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/u.test(path);
-}
-
-function verifyTrustedTests(snapshot) {
-  if (!Array.isArray(snapshot) || snapshot.length === 0) throw new Error('Trusted base test snapshot is empty');
-  for (const entry of snapshot) {
-    if (!entry || typeof entry.path !== 'string' || !isTrustedTestPath(entry.path) ||
-        !/^[0-9a-f]{64}$/u.test(entry.sha256)) throw new Error('Trusted base test snapshot is invalid');
-    let contents;
-    try { contents = readFileSync(entry.path); } catch { throw new Error(`Trusted test was deleted: ${entry.path}`); }
-    if (createHash('sha256').update(contents).digest('hex') !== entry.sha256) {
-      throw new Error(`Trusted test was modified: ${entry.path}`);
-    }
-  }
-  return true;
 }
 
 function isOwnedImplementationPull(pull, key, repository) {

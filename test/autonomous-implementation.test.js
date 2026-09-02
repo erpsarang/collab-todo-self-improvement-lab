@@ -136,6 +136,15 @@ test('publisher uses an explicit trusted dispatch rather than a fourth workflow_
   assert.match(workflow, /Expected exactly one Candidate dispatch/);
 });
 
+test('publisher provenance waits boundedly for completion and requires final success', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  assert.match(workflow, /run\.status !== 'completed' && attempt < 30/);
+  assert.match(workflow, /setTimeout\(resolve, 2000\)/);
+  assert.match(workflow, /Timed out waiting for Candidate Publisher completion/);
+  assert.match(workflow, /run\.conclusion !== 'success'/);
+  assert.match(workflow, /Candidate Publisher provenance changed while polling/);
+});
+
 test('trusted test files cannot be modified or deleted, while new tests are allowed', () => {
   const root = mkdtempSync(join(tmpdir(), 'autonomous-test-tree-'));
   const previous = process.cwd();
@@ -150,6 +159,34 @@ test('trusted test files cannot be modified or deleted, while new tests are allo
     assert.throws(() => verifyTrustedTests(snapshot), /modified/);
     rmSync('test/existing.test.js');
     assert.throws(() => verifyTrustedTests(snapshot), /deleted/);
+  } finally {
+    process.chdir(previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('trusted tests are checked by a verifier captured outside Candidate control', () => {
+  const root = mkdtempSync(join(tmpdir(), 'autonomous-immutable-verifier-'));
+  const verifier = join(root, 'immutable-verifier.js');
+  const snapshotPath = join(root, 'trusted-tests.json');
+  const previous = process.cwd();
+  try {
+    mkdirSync(join(root, 'test'));
+    writeFileSync(join(root, 'test/existing.test.js'), 'trusted\n');
+    const snapshot = [{ path: 'test/existing.test.js', sha256: require('node:crypto').createHash('sha256').update('trusted\n').digest('hex') }];
+    writeFileSync(snapshotPath, JSON.stringify(snapshot));
+    // Model the pre-Codex copy into RUNNER_TEMP, then let the Candidate replace
+    // both the repository verifier and a trusted test.
+    writeFileSync(verifier, readFileSync(join(__dirname, '../scripts/verify-trusted-tests.js')));
+    writeFileSync(join(root, 'verify-trusted-tests.js'), 'process.exit(0)\n');
+    writeFileSync(join(root, 'test/existing.test.js'), 'weakened\n');
+    process.chdir(root);
+    assert.throws(() => execFileSync(process.execPath, [verifier, snapshotPath], { stdio: 'pipe' }));
+
+    const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+    assert.match(workflow, /cp scripts\/verify-trusted-tests\.js "\$RUNNER_TEMP\/verify-trusted-tests\.js"[\s\S]*Implement Candidate/);
+    assert.match(workflow, /node "\$RUNNER_TEMP\/verify-trusted-tests\.js" "\$RUNNER_TEMP\/trusted-tests\.json"/);
+    assert.doesNotMatch(workflow, /node scripts\/autonomous-implementation\.js verify-tests/);
   } finally {
     process.chdir(previous);
     rmSync(root, { recursive: true, force: true });

@@ -33,12 +33,27 @@ jobs:
           script: |
             const runId = Number(context.payload.inputs?.publisher_run_id);
             if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid publisher run ID');
-            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: runId });
+            const getRun = async () => (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: runId })).data;
+            let run = await getRun();
             if (run.id !== runId || run.name !== 'Self-Improvement Candidate Publisher' ||
                 run.path !== '.github/workflows/self-improvement-candidate-publisher.yml' || run.event !== 'workflow_run' ||
-                run.conclusion !== 'success' || run.head_branch !== 'main' || !/^[0-9a-f]{40}$/iu.test(run.head_sha)) {
+                run.head_branch !== 'main' || !/^[0-9a-f]{40}$/iu.test(run.head_sha)) {
               throw new Error('Untrusted Candidate Publisher provenance');
             }
+            // The Publisher dispatches from its final step, before GitHub records
+            // the run's conclusion. Wait for that exact already-authenticated run,
+            // but never turn an incomplete or unsuccessful run into a trusted one.
+            for (let attempt = 0; run.status !== 'completed' && attempt < 30; attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 2000));
+              run = await getRun();
+              if (run.id !== runId || run.name !== 'Self-Improvement Candidate Publisher' ||
+                  run.path !== '.github/workflows/self-improvement-candidate-publisher.yml' || run.event !== 'workflow_run' ||
+                  run.head_branch !== 'main' || !/^[0-9a-f]{40}$/iu.test(run.head_sha)) {
+                throw new Error('Candidate Publisher provenance changed while polling');
+              }
+            }
+            if (run.status !== 'completed') throw new Error('Timed out waiting for Candidate Publisher completion');
+            if (run.conclusion !== 'success') throw new Error(`Candidate Publisher did not succeed: ${run.conclusion}`);
             const { data: main } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
             if (main.object.sha !== run.head_sha) throw new Error('Publisher is not based on current trusted main');
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
@@ -98,12 +113,18 @@ jobs:
           writeFileSync(join(process.env.RUNNER_TEMP, 'trusted-test-command'), command, { mode: 0o500 });
           const { execFileSync } = require('node:child_process');
           const { createHash } = require('node:crypto');
-          const { isTrustedTestPath } = require('./scripts/autonomous-implementation');
+          const isTrustedTestPath = (path) => /(^|\/)(?:test|tests|__tests__)(?:\/|$)/u.test(path) ||
+            /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/u.test(path);
           const paths = execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD']).toString().split('\0').filter(isTrustedTestPath);
           if (!paths.length) throw new Error('Trusted base has no test files');
           const snapshot = paths.map((path) => ({ path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }));
           writeFileSync(join(process.env.RUNNER_TEMP, 'trusted-tests.json'), JSON.stringify(snapshot));
           NODE
+          # This verifier is copied before Codex runs and lives outside its
+          # workspace-write sandbox. Never load verification code from the
+          # Candidate-controlled checkout after implementation.
+          cp scripts/verify-trusted-tests.js "$RUNNER_TEMP/verify-trusted-tests.js"
+          chmod 500 "$RUNNER_TEMP/verify-trusted-tests.js"
       - name: Prepare trusted implementation prompt
         if: steps.eligibility.outputs.eligible == 'true'
         run: node scripts/autonomous-implementation.js prepare
@@ -120,7 +141,7 @@ jobs:
         # the entry point captured from the trusted base with npm's local tools.
         run: |
           npm install
-          node scripts/autonomous-implementation.js verify-tests "$RUNNER_TEMP/trusted-tests.json"
+          node "$RUNNER_TEMP/verify-trusted-tests.js" "$RUNNER_TEMP/trusted-tests.json"
           PATH="$PWD/node_modules/.bin:$PATH" bash -eo pipefail "$RUNNER_TEMP/trusted-test-command"
       - name: Build verifiable implementation artifact
         if: steps.eligibility.outputs.eligible == 'true'
