@@ -39,9 +39,16 @@ jobs:
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
               { ...context.repo, run_id: run.id, per_page: 100 });
             const exact = artifacts.filter(({ name, expired }) => name === 'candidate-dispatch' && !expired);
-            if (exact.length !== 1) throw new Error(`Expected exactly one Candidate dispatch, found ${exact.length}`);
+            if (exact.length === 0) {
+              core.notice('Safe stop: publisher produced NO_CANDIDATE');
+              core.setOutput('has-dispatch', 'false');
+              return;
+            }
+            if (exact.length !== 1) throw new Error(`Expected at most one Candidate dispatch, found ${exact.length}`);
+            core.setOutput('has-dispatch', 'true');
             core.setOutput('run-id', String(run.id));
       - name: Download exact Candidate dispatch
+        if: steps.publisher.outputs.has-dispatch == 'true'
         uses: actions/download-artifact@v4
         with:
           name: candidate-dispatch
@@ -49,12 +56,14 @@ jobs:
           run-id: ${{ steps.publisher.outputs.run-id }}
           github-token: ${{ github.token }}
       - name: Check out trusted implementation base
+        if: steps.publisher.outputs.has-dispatch == 'true'
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
       - name: Evaluate eligibility from trusted metadata
+        if: steps.publisher.outputs.has-dispatch == 'true'
         id: eligibility
         uses: actions/github-script@v7
         with:
@@ -95,7 +104,9 @@ jobs:
           cp candidate-dispatch/candidate-dispatch.json /tmp/candidate-dispatch.json
           rm -rf autonomous-implementation-prompt.md candidate-dispatch
           git add --intent-to-add .
-          git diff --binary --full-index --no-ext-diff > implementation.patch
+          # Diff against HEAD so the artifact contains staged deletions as well as
+          # unstaged modifications and intent-to-add files from the tested tree.
+          git diff HEAD --binary --full-index --no-ext-diff > implementation.patch
           test -s implementation.patch
           mkdir candidate-dispatch
           cp /tmp/candidate-dispatch.json candidate-dispatch/candidate-dispatch.json

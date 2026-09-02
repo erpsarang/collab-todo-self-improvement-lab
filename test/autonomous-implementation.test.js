@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { execFileSync } = require('node:child_process');
+const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { candidateKey } = require('../scripts/self-improvement-candidate');
 const { eligibility, implementationMarker, patchDigest, preparePrompt, validateManifest } = require('../scripts/autonomous-implementation');
@@ -43,4 +45,46 @@ test('workflow separates read-only implementation from publishing and deduplicat
   assert.match(workflow, /\['apply', '--check'/);
   assert.match(workflow, /Closes #\$\{process\.env\.ISSUE\}/);
   assert.equal(implementationMarker(dispatch.candidateKey), implementationMarker(dispatch.candidateKey));
+});
+
+test('implementation patch reproduces the tested tree including tracked deletions', () => {
+  const root = mkdtempSync(join(tmpdir(), 'autonomous-patch-'));
+  const published = mkdtempSync(join(tmpdir(), 'autonomous-published-'));
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+  try {
+    git(root, 'init', '--quiet');
+    git(root, 'config', 'user.name', 'Test');
+    git(root, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(root, 'deleted.txt'), 'remove me\n');
+    writeFileSync(join(root, 'modified.txt'), 'before\n');
+    git(root, 'add', '.');
+    git(root, 'commit', '--quiet', '-m', 'base');
+
+    rmSync(join(root, 'deleted.txt'));
+    writeFileSync(join(root, 'modified.txt'), 'after\n');
+    mkdirSync(join(root, 'new'));
+    writeFileSync(join(root, 'new/file.txt'), 'created\n');
+    git(root, 'add', '--intent-to-add', '.');
+    const patch = git(root, 'diff', 'HEAD', '--binary', '--full-index', '--no-ext-diff');
+
+    assert.match(patch, /deleted file mode/);
+    assert.match(patch, /new file mode/);
+    git(root, 'worktree', 'add', '--quiet', published, 'HEAD');
+    writeFileSync(join(published, 'implementation.patch'), patch);
+    git(published, 'apply', '--index', 'implementation.patch');
+    rmSync(join(published, 'implementation.patch'));
+    assert.equal(git(published, 'status', '--short'), 'D  deleted.txt\nM  modified.txt\nA  new/file.txt\n');
+  } finally {
+    try { git(root, 'worktree', 'remove', '--force', published); } catch {}
+    rmSync(root, { recursive: true, force: true });
+    rmSync(published, { recursive: true, force: true });
+  }
+});
+
+test('workflow treats a trusted publisher run without a dispatch as a safe no-op', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  assert.match(workflow, /exact\.length === 0[\s\S]*Safe stop: publisher produced NO_CANDIDATE[\s\S]*has-dispatch', 'false'/);
+  assert.match(workflow, /Download exact Candidate dispatch\n\s+if: steps\.publisher\.outputs\.has-dispatch == 'true'/);
+  assert.match(workflow, /Evaluate eligibility from trusted metadata\n\s+if: steps\.publisher\.outputs\.has-dispatch == 'true'/);
+  assert.match(workflow, /exact\.length !== 1[\s\S]*throw new Error/);
 });
