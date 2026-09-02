@@ -41,10 +41,21 @@ test('workflow separates read-only implementation from publishing and deduplicat
   const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
   assert.match(workflow, /implement:[\s\S]*contents: read[\s\S]*persist-credentials: false/);
   assert.match(workflow, /publish:[\s\S]*contents: write[\s\S]*pull-requests: write/);
+  assert.match(workflow, /publish:[\s\S]*issues: read/);
+  assert.match(workflow, /Only this write-scoped job receives checkout's push credential[\s\S]*persist-credentials: true/);
   assert.match(workflow, /implementationMarker\(dispatch\.candidateKey\)/);
   assert.match(workflow, /\['apply', '--check'/);
   assert.match(workflow, /Closes #\$\{process\.env\.ISSUE\}/);
   assert.equal(implementationMarker(dispatch.candidateKey), implementationMarker(dispatch.candidateKey));
+});
+
+test('publish rechecks eligibility, protects both rename paths, and uses retryable branches', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  assert.match(workflow, /issues\.get[\s\S]*eligibility\(dispatch, issue, main\.object\.sha\)[\s\S]*no longer eligible/);
+  assert.match(workflow, /--name-status', '-z', '--find-renames', '--find-copies'/);
+  assert.match(workflow, /\^\[RC\][\s\S]*\[changed\[i\+\+\], changed\[i\+\+\]\]/);
+  assert.match(workflow, /path === '\.github' \|\| path\.startsWith\('\.github\/'\)/);
+  assert.match(workflow, /context\.runId\}-\$\{context\.runAttempt\}/);
 });
 
 test('implementation patch reproduces the tested tree including tracked deletions', () => {
@@ -78,6 +89,31 @@ test('implementation patch reproduces the tested tree including tracked deletion
     try { git(root, 'worktree', 'remove', '--force', published); } catch {}
     rmSync(root, { recursive: true, force: true });
     rmSync(published, { recursive: true, force: true });
+  }
+});
+
+test('implementation patch excludes node_modules but retains dependency manifests', () => {
+  const root = mkdtempSync(join(tmpdir(), 'autonomous-install-artifacts-'));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+  try {
+    git('init', '--quiet');
+    git('config', 'user.name', 'Test');
+    git('config', 'user.email', 'test@example.com');
+    writeFileSync(join(root, 'package.json'), '{}\n');
+    git('add', '.');
+    git('commit', '--quiet', '-m', 'base');
+    mkdirSync(join(root, 'node_modules/pkg'), { recursive: true });
+    writeFileSync(join(root, 'node_modules/pkg/index.js'), 'generated\n');
+    writeFileSync(join(root, 'package.json'), '{"dependencies":{"pkg":"1.0.0"}}\n');
+    writeFileSync(join(root, 'package-lock.json'), '{}\n');
+    git('add', '--intent-to-add', '--all', '--', '.', ':(exclude)node_modules', ':(exclude)**/node_modules/**');
+    const patch = git('diff', 'HEAD', '--binary', '--full-index', '--no-ext-diff', '--', '.',
+      ':(exclude)node_modules', ':(exclude)**/node_modules/**');
+    assert.match(patch, /package\.json/);
+    assert.match(patch, /package-lock\.json/);
+    assert.doesNotMatch(patch, /node_modules/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

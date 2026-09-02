@@ -103,10 +103,13 @@ jobs:
         run: |
           cp candidate-dispatch/candidate-dispatch.json /tmp/candidate-dispatch.json
           rm -rf autonomous-implementation-prompt.md candidate-dispatch
-          git add --intent-to-add .
+          # Keep install output out of the artifact while retaining source,
+          # package manifest, and lock-file changes (including deletions).
+          git add --intent-to-add --all -- . ':(exclude)node_modules' ':(exclude)**/node_modules/**'
           # Diff against HEAD so the artifact contains staged deletions as well as
           # unstaged modifications and intent-to-add files from the tested tree.
-          git diff HEAD --binary --full-index --no-ext-diff > implementation.patch
+          git diff HEAD --binary --full-index --no-ext-diff -- . \
+            ':(exclude)node_modules' ':(exclude)**/node_modules/**' > implementation.patch
           test -s implementation.patch
           mkdir candidate-dispatch
           cp /tmp/candidate-dispatch.json candidate-dispatch/candidate-dispatch.json
@@ -129,13 +132,15 @@ jobs:
     permissions:
       actions: read
       contents: write
+      issues: read
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          persist-credentials: false
+          # Only this write-scoped job receives checkout's push credential.
+          persist-credentials: true
       - uses: actions/download-artifact@v4
         with:
           name: candidate-implementation
@@ -147,22 +152,40 @@ jobs:
           script: |
             const fs = require('node:fs');
             const { execFileSync } = require('node:child_process');
-            const { implementationMarker, validateDispatch, validateManifest } = require('./scripts/autonomous-implementation');
+            const { eligibility, implementationMarker, validateDispatch, validateManifest } = require('./scripts/autonomous-implementation');
             const root = 'candidate-implementation/';
             const dispatch = validateDispatch(JSON.parse(fs.readFileSync(`${root}candidate-dispatch.json`, 'utf8')));
             const manifest = JSON.parse(fs.readFileSync(`${root}implementation-manifest.json`, 'utf8'));
             const patch = fs.readFileSync(`${root}implementation.patch`, 'utf8');
             const { data: main } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
             validateManifest(manifest, dispatch, patch, main.object.sha);
-            const changed = execFileSync('git', ['apply', '--numstat', `${root}implementation.patch`], { encoding: 'utf8' });
-            if (changed.split('\n').some((line) => /(?:^|\t)\.github\//u.test(line))) throw new Error('Workflow changes are not publishable');
             execFileSync('git', ['apply', '--check', `${root}implementation.patch`]);
+            const index = `${process.env.RUNNER_TEMP}/candidate-${context.runId}-${context.runAttempt}.index`;
+            const gitEnv = { ...process.env, GIT_INDEX_FILE: index };
+            execFileSync('git', ['read-tree', 'HEAD'], { env: gitEnv });
+            execFileSync('git', ['apply', '--cached', `${root}implementation.patch`], { env: gitEnv });
+            const changed = execFileSync('git', ['diff', '--cached', '--name-status', '-z', '--find-renames', '--find-copies', 'HEAD'],
+              { encoding: 'utf8', env: gitEnv }).split('\0').filter(Boolean);
+            for (let i = 0; i < changed.length;) {
+              const status = changed[i++];
+              const paths = /^[RC]/u.test(status) ? [changed[i++], changed[i++]] : [changed[i++]];
+              if (paths.some((path) => path === '.github' || path.startsWith('.github/'))) {
+                throw new Error('Changes involving .github are not publishable');
+              }
+            }
+            const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: dispatch.candidateIssueNumber });
+            const decision = eligibility(dispatch, issue, main.object.sha);
+            if (!decision.eligible) {
+              core.notice(`Safe stop: Candidate is no longer eligible: ${decision.reason}`);
+              core.setOutput('publish', 'false');
+              return;
+            }
             const pulls = await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 });
             if (pulls.some(({ body }) => String(body || '').includes(implementationMarker(dispatch.candidateKey)))) {
               core.notice('An implementation PR already exists; publishing is unnecessary'); core.setOutput('publish', 'false'); return;
             }
             core.setOutput('publish', 'true');
-            core.setOutput('branch', `codex/autonomous-${dispatch.candidateKey.slice(7, 23)}`);
+            core.setOutput('branch', `codex/autonomous-${dispatch.candidateKey.slice(7, 23)}-${context.runId}-${context.runAttempt}`);
             core.setOutput('issue', String(dispatch.candidateIssueNumber));
             core.setOutput('key', dispatch.candidateKey);
             core.setOutput('review-run', String(dispatch.sourceReviewRunId));
