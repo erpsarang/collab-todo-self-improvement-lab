@@ -117,7 +117,15 @@ jobs:
                 await github.rest.issues.getLabel({ ...context.repo, name });
               } catch (error) {
                 if (error.status !== 404) throw error;
-                await github.rest.issues.createLabel({ ...context.repo, name, color, description });
+                try {
+                  await github.rest.issues.createLabel({ ...context.repo, name, color, description });
+                } catch (createError) {
+                  // A concurrent publisher may have created the same missing label
+                  // after our lookup. Only an already-exists-style conflict is
+                  // recoverable, and only after the label is confirmed to exist.
+                  if (![409, 422].includes(createError.status)) throw createError;
+                  await github.rest.issues.getLabel({ ...context.repo, name });
+                }
               }
             }
 

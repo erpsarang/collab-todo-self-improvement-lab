@@ -91,6 +91,107 @@ test('publisher preserves validated multiline metadata in the registry Issue bod
   assert.match(created.body, /## Evidence\n- First evidence line\n```markdown\n## Impact/);
 });
 
+test('concurrent publishers tolerate an already-created registry label without losing either observation', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-label-race-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(candidatePublication({
+    title: 'Shared label race',
+  })));
+  const existingLabels = new Set();
+  const issues = [];
+  let missingLookups = 0;
+  let releaseLookups;
+  const lookupBarrier = new Promise((resolve) => { releaseLookups = resolve; });
+  const api = {
+    getLabel: async ({ name }) => {
+      if (existingLabels.has(name)) return {};
+      if (name === 'SI-후보' && missingLookups < 2) {
+        missingLookups += 1;
+        if (missingLookups === 2) releaseLookups();
+        await lookupBarrier;
+      }
+      if (existingLabels.has(name)) return {};
+      throw Object.assign(new Error('Not Found'), { status: 404 });
+    },
+    createLabel: async ({ name }) => {
+      if (existingLabels.has(name)) throw Object.assign(new Error('Validation Failed: already exists'), { status: 422 });
+      existingLabels.add(name);
+      return {};
+    },
+    listForRepo: async () => ({ data: issues.filter(({ labels }) => labels.includes('SI-후보')) }),
+    listComments: async ({ issue_number: number }) => ({ data: issues.find(({ number: candidate }) => candidate === number).comments }),
+    create: async (input) => {
+      const issue = { ...input, number: issues.length + 1, comments: [] };
+      issues.push(issue);
+      return { data: issue };
+    },
+    createComment: async ({ issue_number: number, body }) => { issues.find(({ number: candidate }) => candidate === number).comments.push({ body }); },
+    removeLabel: async ({ issue_number: number, name }) => {
+      const issue = issues.find(({ number: candidate }) => candidate === number);
+      issue.labels = issue.labels.filter((label) => label !== name);
+    },
+    update: async ({ issue_number: number, state }) => { issues.find(({ number: candidate }) => candidate === number).state = state; },
+  };
+  const github = { paginate: async (method, input) => (await method(input)).data, rest: { issues: api } };
+  const execute = (runId) => new Function('require', 'github', 'context', 'core', 'process',
+    `return (async () => {\n${script}\n})()`)(require, github, { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: String(runId) } });
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await Promise.all([execute(701), execute(702)]);
+  } finally {
+    process.chdir(previousCwd);
+  }
+  const canonical = issues.find(({ labels }) => labels.includes('SI-후보'));
+  assert.ok(canonical, 'publication stopped during concurrent label creation');
+  const history = [canonical.body, ...canonical.comments.map(({ body }) => body)].join('\n');
+  assert.match(history, /self-improvement-review-run: 701/);
+  assert.match(history, /self-improvement-review-run: 702/);
+});
+
+test('publisher fails closed when a label conflict does not leave the label present', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-label-missing-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(candidatePublication()));
+  let lookups = 0;
+  const github = { rest: { issues: {
+    getLabel: async () => { lookups += 1; throw Object.assign(new Error('Not Found'), { status: 404 }); },
+    createLabel: async () => { throw Object.assign(new Error('Conflict'), { status: 422 }); },
+  } } };
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await assert.rejects(new Function('require', 'github', 'context', 'core', 'process',
+      `return (async () => {\n${script}\n})()`)(require, github, { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: '801' } }), /Not Found/);
+  } finally {
+    process.chdir(previousCwd);
+  }
+  assert.equal(lookups, 2, 'the publisher must verify label existence after a conflict');
+});
+
+test('publisher does not treat unrelated label API errors as concurrency success', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-label-error-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(candidatePublication()));
+  let lookups = 0;
+  const github = { rest: { issues: {
+    getLabel: async () => { lookups += 1; throw Object.assign(new Error('Not Found'), { status: 404 }); },
+    createLabel: async () => { throw Object.assign(new Error('Rate limited'), { status: 429 }); },
+  } } };
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await assert.rejects(new Function('require', 'github', 'context', 'core', 'process',
+      `return (async () => {\n${script}\n})()`)(require, github, { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: '802' } }), /Rate limited/);
+  } finally {
+    process.chdir(previousCwd);
+  }
+  assert.equal(lookups, 1, 'unrelated create errors must not enter conflict recovery');
+});
+
 test('publisher gives every source run an independent scheduling opportunity', () => {
   const source = workflow();
   assert.doesNotMatch(source, /^concurrency:/m);
