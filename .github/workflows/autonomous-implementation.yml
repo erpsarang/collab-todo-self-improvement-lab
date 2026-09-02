@@ -125,7 +125,7 @@ jobs:
     permissions: { actions: read, contents: write, issues: read, pull-requests: write }
     steps:
       - uses: actions/checkout@v4
-        with: { ref: main, fetch-depth: 0, persist-credentials: true }
+        with: { ref: '${{ inputs.source_merge_sha }}', fetch-depth: 0, persist-credentials: true }
       - run: install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
       - uses: actions/download-artifact@v4
         with: { name: 'implementation-${{ github.run_id }}', path: /tmp/trusted/artifact }
@@ -138,7 +138,9 @@ jobs:
           script: |
             const fs=require('fs'),p=require('/tmp/trusted/autonomous-pipeline');
             const m=p.readJson('/tmp/trusted/artifact/implementation.json'),a=p.readJson('/tmp/trusted/attestation/verification.json'),patch=fs.readFileSync('/tmp/trusted/artifact/implementation.patch');
-            p.assertPublishable(m,a,patch,context.sha);
+            const checkedOutSha=(await exec.getExecOutput('git',['rev-parse','HEAD'])).stdout.trim();
+            const currentMainSha=(await github.rest.repos.getBranch({...context.repo,branch:'main'})).data.commit.sha;
+            p.assertPublishable(m,a,patch,currentMainSha,checkedOutSha);
             const issue=(await github.rest.issues.get({...context.repo,issue_number:m.candidateIssue})).data;
             if(!p.eligibleCandidate(issue)) { core.notice('Candidate is no longer eligible; stopping safely'); core.setOutput('publish','false'); return; }
             const prs=await github.paginate(github.rest.pulls.list,{...context.repo,state:'open',per_page:100});
@@ -151,11 +153,22 @@ jobs:
         env: { GH_TOKEN: '${{ github.token }}' }
         run: |
           set -euo pipefail
+          BASE_SHA=$(jq -r .baseSha /tmp/trusted/artifact/implementation.json)
+          VERIFIED_BASE_SHA=$(jq -r .verifiedBaseSha /tmp/trusted/attestation/verification.json)
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          assert_base_invariant() {
+            CURRENT_MAIN_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+            test "$CURRENT_MAIN_SHA" = "$BASE_SHA"
+            test "$BASE_SHA" = "$VERIFIED_BASE_SHA"
+            test "$VERIFIED_BASE_SHA" = "$CHECKED_OUT_SHA"
+          }
+          assert_base_invariant
           git apply --check /tmp/trusted/artifact/implementation.patch
           git apply --index /tmp/trusted/artifact/implementation.patch
           BRANCH="automation/self-improvement/${{ steps.gate.outputs.issue }}-${{ github.run_id }}"
           git switch -c "$BRANCH"
           git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}"
+          assert_base_invariant
           git push origin "HEAD:refs/heads/$BRANCH"
           gh pr create --base main --head "$BRANCH" --title "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}" \
             --body $'<!-- autonomous-candidate-key: ${{ steps.gate.outputs.key }} -->\nImplements Candidate #${{ steps.gate.outputs.issue }} using the exact independently verified implementation artifact.'

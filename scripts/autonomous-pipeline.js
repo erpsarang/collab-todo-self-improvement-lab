@@ -76,7 +76,7 @@ function createAttestation(identity, patchSha256, verificationRunId) {
   };
 }
 
-function assertPublishable(identity, attestation, patch, currentMainSha) {
+function assertPublishable(identity, attestation, patch, currentMainSha, checkedOutSha) {
   validateIdentity(identity);
   validatePatch(patch, identity.patchSha256);
   if (!attestation || attestation.schemaVersion !== 1 || attestation.verificationResult !== 'PASS' ||
@@ -88,6 +88,7 @@ function assertPublishable(identity, attestation, patch, currentMainSha) {
     throw new Error('Attestation does not cover the implementation patch');
   }
   if (currentMainSha !== identity.baseSha) throw new Error('Trusted base is no longer current');
+  if (checkedOutSha !== identity.baseSha) throw new Error('Checked-out base was not verified');
   assertPatchScope(patch);
 }
 

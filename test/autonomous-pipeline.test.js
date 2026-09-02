@@ -14,7 +14,7 @@ test('normal Candidate produces a hash-bound implementation artifact and trusted
   const value = identity();
   p.validateIdentity(value); p.validatePatch(patch, value.patchSha256);
   const attestation = p.createAttestation(value, value.patchSha256, 20);
-  p.assertPublishable(value, attestation, patch, base);
+  p.assertPublishable(value, attestation, patch, base, base);
 });
 
 test('VERIFY rejects deletion and modification of existing trusted tests', () => {
@@ -37,10 +37,24 @@ test('tampered implementation patch fails VERIFY', () => {
   assert.throws(() => p.validatePatch(Buffer.from(`${patch}tamper`), identity().patchSha256), /hash mismatch/u);
 });
 
-test('patch/attestation mismatch and changed main base fail PUBLISH', () => {
+test('patch/attestation mismatch, changed main, and a different checkout fail PUBLISH', () => {
   const value = identity(); const attestation = p.createAttestation(value, value.patchSha256, 20);
-  assert.throws(() => p.assertPublishable(value, { ...attestation, implementationPatchSha256: 'c'.repeat(64) }, patch, base), /does not cover/u);
-  assert.throws(() => p.assertPublishable(value, attestation, patch, 'd'.repeat(40)), /no longer current/u);
+  assert.throws(() => p.assertPublishable(value, { ...attestation, implementationPatchSha256: 'c'.repeat(64) }, patch, base, base), /does not cover/u);
+  assert.throws(() => p.assertPublishable(value, attestation, patch, 'd'.repeat(40), base), /no longer current/u);
+  assert.throws(() => p.assertPublishable(value, attestation, patch, base, 'd'.repeat(40)), /not verified/u);
+});
+
+test('PUBLISH pins the checkout and rechecks the four-way base invariant immediately before applying', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  const publish = workflow.slice(workflow.indexOf('  publish:'));
+  assert.match(publish, /ref: '\$\{\{ inputs\.source_merge_sha \}\}'/u);
+  assert.match(publish, /repos\.getBranch\(\{\.\.\.context\.repo,branch:'main'\}\)/u);
+  assert.match(publish, /git',\['rev-parse','HEAD'\]/u);
+  const recheck = publish.indexOf('CURRENT_MAIN_SHA=$(gh api');
+  const apply = publish.indexOf('git apply --check');
+  assert.ok(recheck > 0 && recheck < apply);
+  assert.match(publish, /test "\$CURRENT_MAIN_SHA" = "\$BASE_SHA"[\s\S]*test "\$BASE_SHA" = "\$VERIFIED_BASE_SHA"[\s\S]*test "\$VERIFIED_BASE_SHA" = "\$CHECKED_OUT_SHA"/u);
+  assert.match(publish, /commit -m[\s\S]*assert_base_invariant[\s\S]*git push/u);
 });
 
 test('candidate eligibility closes safely for closed, held, or rejected records', () => {
