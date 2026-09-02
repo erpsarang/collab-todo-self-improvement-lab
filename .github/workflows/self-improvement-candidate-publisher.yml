@@ -141,15 +141,40 @@ jobs:
             // Concurrent creators may both win the create race, but every run
             // deterministically converges the registry on the lowest Issue number.
             let matching = await findMatchingRecords();
+            let createdRecord = null;
             if (matching.length === 0) {
-              await github.rest.issues.create({
+              const created = await github.rest.issues.create({
                 ...context.repo,
                 title: `[Self-Improvement Candidate] ${publication.title}`,
                 body,
                 labels: ['SI-후보', 'SI-승인대기'],
               });
+              createdRecord = created?.data;
             }
-            matching = await findMatchingRecords();
+            // List endpoints can briefly lag a successful create. Re-query a
+            // bounded number of times so concurrently created records can still
+            // participate in deterministic reconciliation.
+            const reconciliationAttempts = 3;
+            for (let attempt = 0; attempt < reconciliationAttempts; attempt += 1) {
+              matching = await findMatchingRecords();
+              // A publisher that created a record must use the complete bounded
+              // window: its own record can become visible before a concurrent
+              // creator's lower-numbered record. Runs that did not create can
+              // stop as soon as an existing record is confirmed.
+              if (!createdRecord && matching.length > 0) break;
+              if (attempt + 1 < reconciliationAttempts) {
+                await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+              }
+            }
+            // The create response is authoritative for this run when the list
+            // endpoint remains stale, but only after validating its identity.
+            if (createdRecord) {
+              if (!Number.isSafeInteger(createdRecord.number) || createdRecord.number <= 0 ||
+                  candidateKeyFromBody(createdRecord.body) !== key) {
+                throw new Error('Created Candidate record has an invalid identity');
+              }
+              if (!matching.some(({ number }) => number === createdRecord.number)) matching.push(createdRecord);
+            }
             if (matching.length === 0) throw new Error('Candidate record was not visible after publication');
             matching.sort((left, right) => left.number - right.number);
             const [canonical, ...duplicates] = matching;
