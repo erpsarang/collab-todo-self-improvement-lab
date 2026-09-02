@@ -8,9 +8,10 @@ on:
       - completed
 
 # Deliberately separate from the read-only reviewer. This workflow can only
-# read its trusted artifact and maintain candidate Issues.
+# read its trusted artifact, maintain Candidate Issues, and dispatch the next
+# trusted stage without adding another workflow_run hop.
 permissions:
-  actions: read
+  actions: write
   issues: write
 
 jobs:
@@ -240,9 +241,24 @@ jobs:
             core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);
 
       - name: Upload trusted Candidate dispatch
+        if: hashFiles('candidate-dispatch.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: candidate-dispatch
           path: candidate-dispatch.json
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 7
+
+      # Explicit dispatch avoids GitHub's workflow_run chain-depth limit. The
+      # receiver treats this input only as a lookup key and revalidates this run.
+      - name: Dispatch autonomous implementation
+        if: hashFiles('candidate-dispatch.json') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo,
+              workflow_id: 'autonomous-implementation.yml',
+              ref: 'main',
+              inputs: { publisher_run_id: String(context.runId) },
+            });

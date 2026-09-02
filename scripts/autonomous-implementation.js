@@ -39,6 +39,32 @@ function implementationMarker(key) {
   return `<!-- autonomous-implementation-candidate-key: ${key} -->`;
 }
 
+function isTrustedTestPath(path) {
+  return /(^|\/)(?:test|tests|__tests__)(?:\/|$)/u.test(path) ||
+    /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/u.test(path);
+}
+
+function verifyTrustedTests(snapshot) {
+  if (!Array.isArray(snapshot) || snapshot.length === 0) throw new Error('Trusted base test snapshot is empty');
+  for (const entry of snapshot) {
+    if (!entry || typeof entry.path !== 'string' || !isTrustedTestPath(entry.path) ||
+        !/^[0-9a-f]{64}$/u.test(entry.sha256)) throw new Error('Trusted base test snapshot is invalid');
+    let contents;
+    try { contents = readFileSync(entry.path); } catch { throw new Error(`Trusted test was deleted: ${entry.path}`); }
+    if (createHash('sha256').update(contents).digest('hex') !== entry.sha256) {
+      throw new Error(`Trusted test was modified: ${entry.path}`);
+    }
+  }
+  return true;
+}
+
+function isOwnedImplementationPull(pull, key, repository) {
+  const prefix = `codex/autonomous-${key.slice(7, 23)}-`;
+  return String(pull?.body || '').includes(implementationMarker(key)) &&
+    pull?.head?.repo?.full_name === repository && String(pull?.head?.ref || '').startsWith(prefix) &&
+    pull?.user?.login === 'github-actions[bot]';
+}
+
 function patchDigest(patch) {
   return createHash('sha256').update(patch).digest('hex');
 }
@@ -62,6 +88,7 @@ if (require.main === module) {
   const [command] = process.argv.slice(2);
   const dispatch = JSON.parse(readFileSync('candidate-dispatch/candidate-dispatch.json', 'utf8'));
   if (command === 'prepare') writeFileSync('autonomous-implementation-prompt.md', preparePrompt(dispatch));
+  else if (command === 'verify-tests') verifyTrustedTests(JSON.parse(readFileSync(process.argv[3], 'utf8')));
   else if (command === 'manifest') {
     const patch = readFileSync('implementation.patch', 'utf8');
     validateDispatch(dispatch);
@@ -71,4 +98,5 @@ if (require.main === module) {
   } else throw new Error(`Unknown command: ${command}`);
 }
 
-module.exports = { eligibility, implementationMarker, patchDigest, preparePrompt, validateDispatch, validateManifest };
+module.exports = { eligibility, implementationMarker, isOwnedImplementationPull, isTrustedTestPath, patchDigest,
+  preparePrompt, validateDispatch, validateManifest, verifyTrustedTests };

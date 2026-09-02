@@ -426,8 +426,8 @@ test('NO_CANDIDATE metadata makes the publisher return before Issue APIs', async
 
 test('publisher has minimal write permissions and no repository write access', () => {
   const permissions = workflow().match(/^permissions:\n((?:  [^\n]+\n)+)/m);
-  assert.equal(permissions?.[1], '  actions: read\n  issues: write\n');
-  assert.doesNotMatch(permissions[1], /contents:|pull-requests:|actions: write/);
+  assert.equal(permissions?.[1], '  actions: write\n  issues: write\n');
+  assert.doesNotMatch(permissions[1], /contents:|pull-requests:/);
 });
 
 test('NO_CANDIDATE exits without creating an Issue while CANDIDATE can publish', () => {

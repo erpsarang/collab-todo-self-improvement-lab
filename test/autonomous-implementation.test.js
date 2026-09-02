@@ -5,7 +5,8 @@ const { execFileSync } = require('node:child_process');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { candidateKey } = require('../scripts/self-improvement-candidate');
-const { eligibility, implementationMarker, patchDigest, preparePrompt, validateManifest } = require('../scripts/autonomous-implementation');
+const { eligibility, implementationMarker, isOwnedImplementationPull, patchDigest, preparePrompt, validateManifest,
+  verifyTrustedTests } = require('../scripts/autonomous-implementation');
 
 const sha = 'a'.repeat(40);
 const title = 'Automate a validated improvement';
@@ -43,7 +44,7 @@ test('workflow separates read-only implementation from publishing and deduplicat
   assert.match(workflow, /publish:[\s\S]*contents: write[\s\S]*pull-requests: write/);
   assert.match(workflow, /publish:[\s\S]*issues: read/);
   assert.match(workflow, /Only this write-scoped job receives checkout's push credential[\s\S]*persist-credentials: true/);
-  assert.match(workflow, /implementationMarker\(dispatch\.candidateKey\)/);
+  assert.match(workflow, /isOwnedImplementationPull\(pull, dispatch\.candidateKey/);
   assert.match(workflow, /\['apply', '--check'/);
   assert.match(workflow, /Closes #\$\{process\.env\.ISSUE\}/);
   assert.equal(implementationMarker(dispatch.candidateKey), implementationMarker(dispatch.candidateKey));
@@ -118,11 +119,51 @@ test('implementation patch excludes node_modules but retains dependency manifest
 });
 
 test('workflow treats a trusted publisher run without a dispatch as a safe no-op', () => {
+  const publisher = readFileSync(join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml'), 'utf8');
+  assert.match(publisher, /NO_CANDIDATE[\s\S]*no Issue will be created[\s\S]*return/);
+  assert.match(publisher, /Upload trusted Candidate dispatch\n\s+if: hashFiles\('candidate-dispatch\.json'\) != ''/);
+  assert.match(publisher, /Dispatch autonomous implementation\n\s+if: hashFiles\('candidate-dispatch\.json'\) != ''/);
+});
+
+test('publisher uses an explicit trusted dispatch rather than a fourth workflow_run hop', () => {
+  const publisher = readFileSync(join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml'), 'utf8');
   const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
-  assert.match(workflow, /exact\.length === 0[\s\S]*Safe stop: publisher produced NO_CANDIDATE[\s\S]*has-dispatch', 'false'/);
-  assert.match(workflow, /Download exact Candidate dispatch\n\s+if: steps\.publisher\.outputs\.has-dispatch == 'true'/);
-  assert.match(workflow, /Evaluate eligibility from trusted metadata\n\s+if: steps\.publisher\.outputs\.has-dispatch == 'true'/);
-  assert.match(workflow, /exact\.length !== 1[\s\S]*throw new Error/);
+  assert.match(publisher, /createWorkflowDispatch[\s\S]*publisher_run_id: String\(context\.runId\)/);
+  assert.match(workflow, /workflow_dispatch:[\s\S]*publisher_run_id:/);
+  assert.doesNotMatch(workflow, /workflows: \[Self-Improvement Candidate Publisher\]/);
+  assert.match(workflow, /getWorkflowRun[\s\S]*Self-Improvement Candidate Publisher[\s\S]*run\.event !== 'workflow_run'/);
+  assert.match(workflow, /main\.object\.sha !== run\.head_sha/);
+  assert.match(workflow, /Expected exactly one Candidate dispatch/);
+});
+
+test('trusted test files cannot be modified or deleted, while new tests are allowed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'autonomous-test-tree-'));
+  const previous = process.cwd();
+  try {
+    process.chdir(root);
+    mkdirSync('test');
+    writeFileSync('test/existing.test.js', 'trusted\n');
+    const snapshot = [{ path: 'test/existing.test.js', sha256: require('node:crypto').createHash('sha256').update('trusted\n').digest('hex') }];
+    writeFileSync('test/new.test.js', 'new regression\n');
+    assert.equal(verifyTrustedTests(snapshot), true);
+    writeFileSync('test/existing.test.js', 'weakened\n');
+    assert.throws(() => verifyTrustedTests(snapshot), /modified/);
+    rmSync('test/existing.test.js');
+    assert.throws(() => verifyTrustedTests(snapshot), /deleted/);
+  } finally {
+    process.chdir(previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('duplicate PR detection requires repository, autonomous branch, marker, and bot ownership', () => {
+  const repository = 'owner/repo';
+  const pull = { body: implementationMarker(dispatch.candidateKey), head: { ref: `codex/autonomous-${dispatch.candidateKey.slice(7, 23)}-1-1`,
+    repo: { full_name: repository } }, user: { login: 'github-actions[bot]' } };
+  assert.equal(isOwnedImplementationPull(pull, dispatch.candidateKey, repository), true);
+  assert.equal(isOwnedImplementationPull({ ...pull, head: { ...pull.head, repo: { full_name: 'fork/repo' } } }, dispatch.candidateKey, repository), false);
+  assert.equal(isOwnedImplementationPull({ ...pull, head: { ...pull.head, ref: 'contributor/copied-marker' } }, dispatch.candidateKey, repository), false);
+  assert.equal(isOwnedImplementationPull({ ...pull, user: { login: 'contributor' } }, dispatch.candidateKey, repository), false);
 });
 
 test('checkout precedes dispatch download so eligibility can read the artifact', () => {

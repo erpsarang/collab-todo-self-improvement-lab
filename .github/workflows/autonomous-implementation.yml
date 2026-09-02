@@ -1,9 +1,12 @@
 name: Autonomous Candidate Implementation
 
 on:
-  workflow_run:
-    workflows: [Self-Improvement Candidate Publisher]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      publisher_run_id:
+        description: Trusted Candidate Publisher run to revalidate
+        required: true
+        type: string
 
 # Serialize dispatches so duplicate observations converge before any branch is published.
 concurrency:
@@ -14,7 +17,6 @@ permissions: {}
 
 jobs:
   implement:
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -29,22 +31,20 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const expected = context.payload.workflow_run;
-            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: expected.id });
-            if (run.id !== expected.id || run.name !== 'Self-Improvement Candidate Publisher' ||
+            const runId = Number(context.payload.inputs?.publisher_run_id);
+            if (!Number.isSafeInteger(runId) || runId <= 0) throw new Error('Invalid publisher run ID');
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: runId });
+            if (run.id !== runId || run.name !== 'Self-Improvement Candidate Publisher' ||
                 run.path !== '.github/workflows/self-improvement-candidate-publisher.yml' || run.event !== 'workflow_run' ||
-                run.conclusion !== 'success' || run.head_branch !== 'main' || run.head_sha !== expected.head_sha) {
+                run.conclusion !== 'success' || run.head_branch !== 'main' || !/^[0-9a-f]{40}$/iu.test(run.head_sha)) {
               throw new Error('Untrusted Candidate Publisher provenance');
             }
+            const { data: main } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
+            if (main.object.sha !== run.head_sha) throw new Error('Publisher is not based on current trusted main');
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
               { ...context.repo, run_id: run.id, per_page: 100 });
             const exact = artifacts.filter(({ name, expired }) => name === 'candidate-dispatch' && !expired);
-            if (exact.length === 0) {
-              core.notice('Safe stop: publisher produced NO_CANDIDATE');
-              core.setOutput('has-dispatch', 'false');
-              return;
-            }
-            if (exact.length !== 1) throw new Error(`Expected at most one Candidate dispatch, found ${exact.length}`);
+            if (exact.length !== 1) throw new Error(`Expected exactly one Candidate dispatch, found ${exact.length}`);
             core.setOutput('has-dispatch', 'true');
             core.setOutput('run-id', String(run.id));
       # Checkout must precede artifact download: checkout cleans an unversioned
@@ -71,14 +71,14 @@ jobs:
         with:
           script: |
             const fs = require('node:fs');
-            const { eligibility, implementationMarker, validateDispatch } = require('./scripts/autonomous-implementation');
+            const { eligibility, isOwnedImplementationPull, validateDispatch } = require('./scripts/autonomous-implementation');
             const dispatch = validateDispatch(JSON.parse(fs.readFileSync('candidate-dispatch/candidate-dispatch.json', 'utf8')));
             const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: dispatch.candidateIssueNumber });
             const { data: main } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
             const decision = eligibility(dispatch, issue, main.object.sha);
             if (!decision.eligible) { core.notice(`Safe stop: ${decision.reason}`); core.setOutput('eligible', 'false'); return; }
             const pulls = await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 });
-            if (pulls.some(({ body }) => String(body || '').includes(implementationMarker(dispatch.candidateKey)))) {
+            if (pulls.some((pull) => isOwnedImplementationPull(pull, dispatch.candidateKey, `${context.repo.owner}/${context.repo.repo}`))) {
               core.notice('Safe stop: an active implementation PR already exists'); core.setOutput('eligible', 'false'); return;
             }
             core.setOutput('eligible', 'true');
@@ -96,6 +96,13 @@ jobs:
           const command = JSON.parse(readFileSync('package.json', 'utf8')).scripts?.test;
           if (typeof command !== 'string' || !command.trim()) throw new Error('Trusted base has no test entry point');
           writeFileSync(join(process.env.RUNNER_TEMP, 'trusted-test-command'), command, { mode: 0o500 });
+          const { execFileSync } = require('node:child_process');
+          const { createHash } = require('node:crypto');
+          const { isTrustedTestPath } = require('./scripts/autonomous-implementation');
+          const paths = execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', 'HEAD']).toString().split('\0').filter(isTrustedTestPath);
+          if (!paths.length) throw new Error('Trusted base has no test files');
+          const snapshot = paths.map((path) => ({ path, sha256: createHash('sha256').update(readFileSync(path)).digest('hex') }));
+          writeFileSync(join(process.env.RUNNER_TEMP, 'trusted-tests.json'), JSON.stringify(snapshot));
           NODE
       - name: Prepare trusted implementation prompt
         if: steps.eligibility.outputs.eligible == 'true'
@@ -111,7 +118,10 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true'
         # Never invoke the Candidate-controlled package.json test script. Execute
         # the entry point captured from the trusted base with npm's local tools.
-        run: npm install && PATH="$PWD/node_modules/.bin:$PATH" bash -eo pipefail "$RUNNER_TEMP/trusted-test-command"
+        run: |
+          npm install
+          node scripts/autonomous-implementation.js verify-tests "$RUNNER_TEMP/trusted-tests.json"
+          PATH="$PWD/node_modules/.bin:$PATH" bash -eo pipefail "$RUNNER_TEMP/trusted-test-command"
       - name: Build verifiable implementation artifact
         if: steps.eligibility.outputs.eligible == 'true'
         run: |
@@ -166,7 +176,7 @@ jobs:
           script: |
             const fs = require('node:fs');
             const { execFileSync } = require('node:child_process');
-            const { eligibility, implementationMarker, validateDispatch, validateManifest } = require('./scripts/autonomous-implementation');
+            const { eligibility, isOwnedImplementationPull, validateDispatch, validateManifest } = require('./scripts/autonomous-implementation');
             const root = 'candidate-implementation/';
             const dispatch = validateDispatch(JSON.parse(fs.readFileSync(`${root}candidate-dispatch.json`, 'utf8')));
             const manifest = JSON.parse(fs.readFileSync(`${root}implementation-manifest.json`, 'utf8'));
@@ -195,7 +205,7 @@ jobs:
               return;
             }
             const pulls = await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 });
-            if (pulls.some(({ body }) => String(body || '').includes(implementationMarker(dispatch.candidateKey)))) {
+            if (pulls.some((pull) => isOwnedImplementationPull(pull, dispatch.candidateKey, `${context.repo.owner}/${context.repo.repo}`))) {
               core.notice('An implementation PR already exists; publishing is unnecessary'); core.setOutput('publish', 'false'); return;
             }
             core.setOutput('publish', 'true');
