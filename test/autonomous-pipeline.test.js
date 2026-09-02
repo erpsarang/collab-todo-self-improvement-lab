@@ -24,6 +24,37 @@ test('VERIFY rejects deletion and modification of existing trusted tests', () =>
   assert.doesNotThrow(() => p.assertTrustedTests(trusted, { ...trusted, 'test/new.test.js': p.sha256('new') }));
 });
 
+test('VERIFY independently creates the base-test trust anchor before applying the Candidate patch', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  const implement = workflow.slice(workflow.indexOf('  implement:'), workflow.indexOf('  verify:'));
+  const verify = workflow.slice(workflow.indexOf('  verify:'), workflow.indexOf('  publish:'));
+  assert.doesNotMatch(implement, /base-tests\.sha256/u);
+  assert.match(verify, /find test -type f[\s\S]*> \/tmp\/trusted\/base-tests\.sha256[\s\S]*git apply --index/u);
+  assert.doesNotMatch(workflow, /artifact\/base-tests\.sha256/u);
+});
+
+test('recurring Candidate provenance is bound to the trusted Review artifact, not mutable Issue text', () => {
+  const publication = { schemaVersion: 1, result: 'CANDIDATE', title: 'Recurring Candidate', verifiedMergeSha: 'c'.repeat(40) };
+  const recurringKey = `sha256:${p.sha256('recurring candidate')}`;
+  const run = { id: 702, name: 'Self-Improvement Review', path: '.github/workflows/self-improvement-review.yml',
+    event: 'workflow_run', conclusion: 'success', head_branch: 'main', head_sha: publication.verifiedMergeSha };
+  assert.doesNotThrow(() => p.validateReviewProvenance(run, publication, {
+    reviewRunId: 702, sourceMergeSha: publication.verifiedMergeSha, candidateKey: recurringKey,
+  }));
+  assert.throws(() => p.validateReviewProvenance(run, publication, {
+    reviewRunId: 701, sourceMergeSha: publication.verifiedMergeSha, candidateKey: recurringKey,
+  }), /provenance/u);
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  assert.match(workflow, /run-id: '\$\{\{ inputs\.review_run_id \}\}'/u);
+  assert.doesNotMatch(workflow, /observations\.includes|Source merge SHA.*inputs\.source_merge_sha/u);
+  assert.doesNotMatch(workflow, /issue\.body.*candidate_key|candidate_key.*issue\.body/u);
+  assert.match(workflow, /publisher-artifact\/publisher-dispatch\.json/u);
+  assert.doesNotThrow(() => p.validatePublisherDispatch({ schemaVersion: 1, candidateIssue: 23,
+    candidateKey: recurringKey, reviewRunId: 702, sourceMergeSha: publication.verifiedMergeSha, publisherRunId: 900 },
+  { candidateIssue: 23, candidateKey: recurringKey, reviewRunId: 702,
+    sourceMergeSha: publication.verifiedMergeSha, publisherRunId: 900 }));
+});
+
 test('changed package test scripts, helpers, lifecycle scripts, and manifest generators are not verification authorities', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
   assert.match(workflow, /install -D scripts\/autonomous-pipeline\.js \/tmp\/trusted/u);

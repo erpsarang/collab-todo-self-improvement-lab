@@ -33,6 +33,33 @@ function validatePatch(patch, expectedHash) {
   if (!equalHash(sha256(patch), expectedHash)) throw new Error('Implementation patch hash mismatch');
 }
 
+function validateReviewProvenance(run, publication, { reviewRunId, sourceMergeSha, candidateKey }) {
+  if (!run || run.id !== reviewRunId || run.name !== 'Self-Improvement Review' ||
+      run.path !== '.github/workflows/self-improvement-review.yml' || run.event !== 'workflow_run' ||
+      run.conclusion !== 'success' || run.head_branch !== 'main' || run.head_sha !== sourceMergeSha) {
+    throw new Error('Untrusted Review run provenance');
+  }
+  if (!publication || publication.schemaVersion !== 1 || publication.result !== 'CANDIDATE' ||
+      publication.verifiedMergeSha !== sourceMergeSha || typeof publication.title !== 'string' || !publication.title) {
+    throw new Error('Review artifact provenance mismatch');
+  }
+  const normalizedTitle = publication.title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
+  if (`sha256:${sha256(normalizedTitle)}` !== candidateKey) throw new Error('Review artifact Candidate key mismatch');
+}
+
+function validatePublisherDispatch(dispatch, expected) {
+  const fields = ['candidateIssue', 'candidateKey', 'reviewRunId', 'sourceMergeSha', 'publisherRunId'];
+  if (!dispatch || dispatch.schemaVersion !== 1 || fields.some((field) => dispatch[field] !== expected[field])) {
+    throw new Error('Trusted Publisher dispatch provenance mismatch');
+  }
+  if (!Number.isSafeInteger(dispatch.candidateIssue) || dispatch.candidateIssue <= 0 ||
+      !Number.isSafeInteger(dispatch.reviewRunId) || dispatch.reviewRunId <= 0 ||
+      !Number.isSafeInteger(dispatch.publisherRunId) || dispatch.publisherRunId <= 0 ||
+      !KEY.test(dispatch.candidateKey) || !SHA.test(dispatch.sourceMergeSha)) {
+    throw new Error('Trusted Publisher dispatch provenance is invalid');
+  }
+}
+
 function parsePatchPaths(patch) {
   const paths = [];
   for (const line of String(patch).split(/\r?\n/u)) {
@@ -123,4 +150,4 @@ function readJson(path) { return JSON.parse(readFileSync(path, 'utf8')); }
 
 module.exports = { assertPatchScope, assertPublishable, assertTrustedTests, createAttestation,
   eligibleCandidate, equalHash, isOwnedDuplicate, parsePatchPaths, readJson, sha256, validateIdentity,
-  validatePatch, waitForPublisher };
+  validatePatch, validatePublisherDispatch, validateReviewProvenance, waitForPublisher };

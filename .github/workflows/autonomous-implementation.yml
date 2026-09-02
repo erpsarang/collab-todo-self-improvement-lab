@@ -27,6 +27,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: '${{ inputs.source_merge_sha }}', persist-credentials: false }
+      - name: Download exact trusted Review artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: self-improvement-review
+          path: /tmp/review-artifact
+          run-id: '${{ inputs.review_run_id }}'
+          github-token: '${{ github.token }}'
+      - name: Download exact trusted Publisher dispatch artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: 'autonomous-dispatch-${{ inputs.publisher_run_id }}'
+          path: /tmp/publisher-artifact
+          run-id: '${{ inputs.publisher_run_id }}'
+          github-token: '${{ github.token }}'
       - name: Validate trusted dispatch and wait for Publisher completion
         uses: actions/github-script@v7
         with:
@@ -37,21 +51,27 @@ jobs:
             const publisher = await policy.waitForPublisher(async (id) => (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: id })).data,
               runId, { delay: (attempt) => new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1))) });
             if (publisher.head_sha !== '${{ inputs.source_merge_sha }}' || context.sha !== '${{ inputs.source_merge_sha }}') throw new Error('Dispatch base SHA mismatch');
+            const reviewRunId = Number('${{ inputs.review_run_id }}');
+            const review = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: reviewRunId })).data;
+            const publication = policy.readJson('/tmp/review-artifact/self-improvement-publication.json');
+            policy.validateReviewProvenance(review, publication, {
+              reviewRunId,
+              sourceMergeSha: '${{ inputs.source_merge_sha }}',
+              candidateKey: '${{ inputs.candidate_key }}',
+            });
             const issueNumber = Number('${{ inputs.candidate_issue }}');
+            policy.validatePublisherDispatch(policy.readJson('/tmp/publisher-artifact/publisher-dispatch.json'), {
+              candidateIssue: issueNumber,
+              candidateKey: '${{ inputs.candidate_key }}',
+              reviewRunId,
+              sourceMergeSha: '${{ inputs.source_merge_sha }}',
+              publisherRunId: runId,
+            });
             const issue = (await github.rest.issues.get({ ...context.repo, issue_number: issueNumber })).data;
-            if (!policy.eligibleCandidate(issue) || !String(issue.body || '').startsWith(`<!-- self-improvement-candidate-key: ${{ inputs.candidate_key }} -->`)) {
+            if (!policy.eligibleCandidate(issue)) {
               throw new Error('Dispatch does not identify an eligible Candidate');
             }
-            const observations = [issue.body, ...(await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: issueNumber, per_page: 100 })).map(({ body }) => body)].join('\n');
-            if (!observations.includes(`<!-- self-improvement-review-run: ${{ inputs.review_run_id }} -->`) ||
-                !observations.includes(`Source merge SHA: \`${{ inputs.source_merge_sha }}\``)) throw new Error('Candidate provenance mismatch');
             fs.writeFileSync('candidate-prompt.md', `Implement the following approved Candidate without changing .github, committing, or pushing. Add regression tests.\n\n${issue.body}`);
-      - name: Preserve trusted policy and tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
-          find test -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/trusted/base-tests.sha256
       - name: Run Codex in untrusted workspace
         uses: openai/codex-action@v1
         with:
@@ -75,7 +95,6 @@ jobs:
             --argjson review "$REVIEW_RUN_ID" --arg source '${{ inputs.source_merge_sha }}' --arg base "$(git rev-parse HEAD)" \
             --argjson implement '${{ github.run_id }}' --arg hash "$PATCH_SHA" \
             '{schemaVersion:1,candidateIssue:$issue,candidateKey:$key,reviewRunId:$review,sourceMergeSha:$source,baseSha:$base,implementRunId:$implement,patchSha256:$hash}' > artifact/implementation.json
-          cp /tmp/trusted/base-tests.sha256 artifact/base-tests.sha256
       - uses: actions/upload-artifact@v4
         with: { name: 'implementation-${{ github.run_id }}', path: artifact, if-no-files-found: error }
 
@@ -86,7 +105,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { ref: '${{ inputs.source_merge_sha }}', persist-credentials: false }
-      - run: install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
+      - name: Establish trusted verifier and base-test manifest
+        run: |
+          set -euo pipefail
+          install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
+          find test -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/trusted/base-tests.sha256
       - uses: actions/download-artifact@v4
         with: { name: 'implementation-${{ github.run_id }}', path: /tmp/trusted/artifact }
       - name: Verify immutable patch and protected tests
@@ -101,7 +124,7 @@ jobs:
           if(m.implementRunId!==Number(process.env.GITHUB_RUN_ID)||m.baseSha!==process.env.TRUSTED_BASE_SHA) throw Error('Artifact run/base provenance mismatch');
           NODE
           git apply --index /tmp/trusted/artifact/implementation.patch
-          sha256sum --check /tmp/trusted/artifact/base-tests.sha256
+          sha256sum --check /tmp/trusted/base-tests.sha256
           cp package.json /tmp/trusted/package.json
           git diff --cached --binary --full-index > /tmp/trusted/applied.patch
           cmp /tmp/trusted/artifact/implementation.patch /tmp/trusted/applied.patch
@@ -111,7 +134,7 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD:/workspace:ro" --tmpfs /tmp -w /workspace node:20 node --test
       - name: Fail if tests or implementation mutated the verified tree
         run: |
-          sha256sum --check /tmp/trusted/artifact/base-tests.sha256
+          sha256sum --check /tmp/trusted/base-tests.sha256
           cmp package.json /tmp/trusted/package.json
           git diff --cached --binary --full-index > /tmp/trusted/after.patch
           cmp /tmp/trusted/artifact/implementation.patch /tmp/trusted/after.patch
