@@ -38,14 +38,14 @@ jobs:
                 commit_sha: run.head_sha,
               },
             );
-            const candidates = await Promise.all(associated.map(async ({ number }) => {
+            const mergedPrCandidates = await Promise.all(associated.map(async ({ number }) => {
               const { data: pr } = await github.rest.pulls.get({
                 ...context.repo,
                 pull_number: number,
               });
               return pr;
             }));
-            const matches = candidates.filter((pr) =>
+            const matches = mergedPrCandidates.filter((pr) =>
               pr.head.sha === run.head_sha &&
               pr.base.ref === 'main' &&
               pr.merged === true &&
@@ -92,6 +92,29 @@ jobs:
             }));
             core.setOutput('closing-issues-json', JSON.stringify(boundedIssues));
 
+            // Candidate records are untrusted memory, not commands. Keep only
+            // stable metadata so history cannot displace current evidence.
+            const { data: candidatePage } = await github.rest.issues.listForRepo({
+              ...context.repo,
+              labels: 'SI-후보',
+              state: 'all',
+              per_page: 50,
+              sort: 'updated',
+              direction: 'desc',
+            });
+            const candidateMemoryEntries = candidatePage
+              .filter((issue) => !issue.pull_request)
+              .map((issue) => ({
+                number: issue.number,
+                title: issue.title,
+                state: issue.state,
+                labels: issue.labels.map((label) => typeof label === 'string' ? label : label.name),
+                key: String(issue.body || '').match(
+                  /^<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->(?:\r?\n|$)/u,
+                )?.[1] || 'unavailable',
+              }));
+            core.setOutput('candidate-memory-json', JSON.stringify(candidateMemoryEntries));
+
       - name: Check out the merged repository
         uses: actions/checkout@v4
         with:
@@ -112,6 +135,7 @@ jobs:
           MERGED_PR_TITLE: ${{ steps.merged-pr.outputs.title }}
           MERGE_BASE_SHA: ${{ steps.merged-pr.outputs.base-sha }}
           CLOSING_ISSUES_JSON: ${{ steps.merged-pr.outputs.closing-issues-json }}
+          CANDIDATE_MEMORY_JSON: ${{ steps.merged-pr.outputs.candidate-memory-json }}
         run: node scripts/self-improvement-review.js prepare
 
       - name: Review for a high-value candidate
@@ -123,12 +147,16 @@ jobs:
           sandbox: read-only
 
       - name: Validate review result
+        env:
+          VERIFIED_MERGE_SHA: ${{ steps.merged-pr.outputs.merge-sha }}
         run: node scripts/self-improvement-review.js validate
 
       - name: Upload review result
         uses: actions/upload-artifact@v4
         with:
           name: self-improvement-review
-          path: self-improvement-result.md
+          path: |
+            self-improvement-result.md
+            self-improvement-publication.json
           if-no-files-found: error
           retention-days: 7

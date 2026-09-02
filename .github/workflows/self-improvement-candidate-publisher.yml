@@ -1,0 +1,201 @@
+name: Self-Improvement Candidate Publisher
+
+on:
+  workflow_run:
+    workflows:
+      - Self-Improvement Review
+    types:
+      - completed
+
+# Deliberately separate from the read-only reviewer. This workflow can only
+# read its trusted artifact and maintain candidate Issues.
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify trusted review run and artifact
+        id: source
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expected = context.payload.workflow_run;
+            if (!Number.isSafeInteger(expected.id) || expected.id <= 0) throw new Error('Invalid source run ID');
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              ...context.repo,
+              run_id: expected.id,
+            });
+            if (run.id !== expected.id || run.name !== 'Self-Improvement Review') {
+              throw new Error('Unexpected source workflow identity');
+            }
+            if (run.path !== '.github/workflows/self-improvement-review.yml') {
+              throw new Error('Unexpected source workflow path');
+            }
+            if (run.event !== 'workflow_run' || run.conclusion !== 'success' || run.head_branch !== 'main') {
+              throw new Error('Source was not a successful trusted main-branch review');
+            }
+            if (!/^[0-9a-f]{40}$/i.test(run.head_sha) || run.head_sha !== expected.head_sha) {
+              throw new Error('Invalid or inconsistent source head SHA');
+            }
+            const { data: artifacts } = await github.rest.actions.listWorkflowRunArtifacts({
+              ...context.repo,
+              run_id: run.id,
+              name: 'self-improvement-review',
+              per_page: 100,
+            });
+            const exact = artifacts.artifacts.filter((artifact) =>
+              artifact.name === 'self-improvement-review' && !artifact.expired
+            );
+            if (exact.length !== 1) throw new Error(`Expected one validated artifact, found ${exact.length}`);
+            core.setOutput('run-id', String(run.id));
+            core.setOutput('head-sha', run.head_sha);
+
+      - name: Download exact validated review artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: self-improvement-review
+          path: candidate-artifact
+          run-id: ${{ steps.source.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish candidate record
+        uses: actions/github-script@v7
+        env:
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run-id }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const crypto = require('node:crypto');
+            const publicationPath = 'candidate-artifact/self-improvement-publication.json';
+            if (!fs.existsSync(publicationPath)) throw new Error('Validated publication metadata is missing');
+            const publication = JSON.parse(fs.readFileSync(publicationPath, 'utf8'));
+            const requiredStrings = [
+              'result', 'verificationStatus', 'verificationEvidence', 'residualRisk', 'verifiedMergeSha',
+            ];
+            if (publication.schemaVersion !== 1 || requiredStrings.some((name) => typeof publication[name] !== 'string' || !publication[name])) {
+              throw new Error('Publication metadata has an invalid schema');
+            }
+            if (!['PASS', 'CONCERN', 'NOT_APPLICABLE'].includes(publication.verificationStatus) ||
+                !/^[0-9a-f]{40}$/iu.test(publication.verifiedMergeSha)) {
+              throw new Error('Publication metadata has invalid verification provenance');
+            }
+            if (publication.result === 'NO_CANDIDATE') {
+              core.info('NO_CANDIDATE: no Issue will be created');
+              return;
+            }
+            if (publication.result !== 'CANDIDATE') throw new Error('Publication metadata has an invalid result');
+            const candidateStrings = ['title', 'observation', 'evidence', 'impact', 'suggestedScope', 'nonGoals'];
+            if (candidateStrings.some((name) => typeof publication[name] !== 'string' || !publication[name]) ||
+                !publication.scores || !Number.isInteger(publication.total)) {
+              throw new Error('Candidate publication metadata is incomplete');
+            }
+            const normalizedTitle = publication.title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
+            const key = `sha256:${crypto.createHash('sha256').update(normalizedTitle).digest('hex')}`;
+            const keyMarker = `<!-- self-improvement-candidate-key: ${key} -->`;
+            const runMarker = `<!-- self-improvement-review-run: ${process.env.SOURCE_RUN_ID} -->`;
+            const scoreNames = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
+            if (scoreNames.some((name) => !Number.isInteger(publication.scores[name]) || publication.scores[name] < 0 || publication.scores[name] > 3) ||
+                scoreNames.reduce((sum, name) => sum + publication.scores[name], 0) !== publication.total) {
+              throw new Error('Candidate publication scores are invalid');
+            }
+            const scoresMarkdown = scoreNames.map((name) => `- ${name}: ${publication.scores[name]}`).join('\n') +
+              `\n\nTotal: ${publication.total}/15`;
+
+            const labels = [
+              ['SI-후보', '5319e7', 'Self-improvement candidate registry record'],
+              ['SI-승인대기', 'd4c5f9', 'Awaiting a human decision'],
+              ['SI-승인', '0e8a16', 'Approved by a human; does not trigger implementation'],
+              ['SI-보류', 'fbca04', 'Deferred by a human'],
+              ['SI-거절', 'b60205', 'Rejected by a human'],
+            ];
+            for (const [name, color, description] of labels) {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                try {
+                  await github.rest.issues.createLabel({ ...context.repo, name, color, description });
+                } catch (createError) {
+                  // A concurrent publisher may have created the same missing label
+                  // after our lookup. Only an already-exists-style conflict is
+                  // recoverable, and only after the label is confirmed to exist.
+                  if (![409, 422].includes(createError.status)) throw createError;
+                  await github.rest.issues.getLabel({ ...context.repo, name });
+                }
+              }
+            }
+
+            const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${publication.title}\n\n## Observation\n${publication.observation}\n\n## Evidence\n${publication.evidence}\n\n## Impact\n${publication.impact}\n\n## Scores\n${scoresMarkdown}\n\n## Suggested Scope\n${publication.suggestedScope}\n\n## Non-Goals\n${publication.nonGoals}\n\n## Verification Status\n${publication.verificationStatus}\n\n## Verification Target\n${publication.verificationTarget || 'Not applicable'}\n\n## Verification Evidence\n${publication.verificationEvidence}\n\n## Residual Risk\n${publication.residualRisk}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${publication.verifiedMergeSha}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
+            const candidateKeyFromBody = (issueBody) => String(issueBody || '').match(
+              /^<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->(?:\r?\n|$)/u,
+            )?.[1] || null;
+            const findMatchingRecords = async () => (await github.paginate(github.rest.issues.listForRepo, {
+              ...context.repo, labels: 'SI-후보', state: 'all', per_page: 100,
+            })).filter((issue) => !issue.pull_request && candidateKeyFromBody(issue.body) === key);
+
+            // Recheck immediately before creation, then reconcile afterward.
+            // Concurrent creators may both win the create race, but every run
+            // deterministically converges the registry on the lowest Issue number.
+            let matching = await findMatchingRecords();
+            if (matching.length === 0) {
+              await github.rest.issues.create({
+                ...context.repo,
+                title: `[Self-Improvement Candidate] ${publication.title}`,
+                body,
+                labels: ['SI-후보', 'SI-승인대기'],
+              });
+            }
+            matching = await findMatchingRecords();
+            if (matching.length === 0) throw new Error('Candidate record was not visible after publication');
+            matching.sort((left, right) => left.number - right.number);
+            const [canonical, ...duplicates] = matching;
+            const allRecords = [canonical, ...duplicates];
+            const observations = [];
+            for (const record of allRecords) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: record.number, per_page: 100,
+              });
+              observations.push(String(record.body || ''), ...comments.map(({ body }) => String(body || '')));
+            }
+            if (!observations.some((text) => text.includes(runMarker))) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: canonical.number,
+                body: `${runMarker}\nReobserved by Self-Improvement Review run ${process.env.SOURCE_RUN_ID}.\n\nSource merge SHA: \`${publication.verifiedMergeSha}\``,
+              });
+            }
+            const canonicalComments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: canonical.number, per_page: 100,
+            });
+            let canonicalText = [canonical.body, ...canonicalComments.map(({ body }) => body)].join('\n');
+            const runEntries = new Map();
+            for (const text of observations) {
+              for (const match of text.matchAll(/<!-- self-improvement-review-run: (\d+) -->/gu)) {
+                if (!runEntries.has(match[1])) runEntries.set(match[1], match[0]);
+              }
+            }
+            for (const [runId, marker] of runEntries) {
+              if (canonicalText.includes(marker)) continue;
+              const recurrence = `${marker}\nReconciled observation from duplicate Candidate Registry record (source run ${runId}).`;
+              await github.rest.issues.createComment({ ...context.repo, issue_number: canonical.number, body: recurrence });
+              canonicalText += `\n${recurrence}`;
+            }
+            for (const duplicate of duplicates) {
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: duplicate.number,
+                body: `Duplicate Candidate Registry record reconciled into canonical Issue #${canonical.number}.`,
+              });
+              await github.rest.issues.removeLabel({
+                ...context.repo, issue_number: duplicate.number, name: 'SI-후보',
+              }).catch((error) => {
+                // Another concurrent reconciler may already have archived it.
+                if (error.status !== 404) throw error;
+              });
+              await github.rest.issues.update({ ...context.repo, issue_number: duplicate.number, state: 'closed' });
+            }
+            core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);
