@@ -157,8 +157,11 @@ jobs:
             const reconciliationAttempts = 3;
             for (let attempt = 0; attempt < reconciliationAttempts; attempt += 1) {
               matching = await findMatchingRecords();
-              if ((!createdRecord && matching.length > 0) ||
-                  (createdRecord && matching.some(({ number }) => number === createdRecord.number))) break;
+              // A publisher that created a record must use the complete bounded
+              // window: its own record can become visible before a concurrent
+              // creator's lower-numbered record. Runs that did not create can
+              // stop as soon as an existing record is confirmed.
+              if (!createdRecord && matching.length > 0) break;
               if (attempt + 1 < reconciliationAttempts) {
                 await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
               }
