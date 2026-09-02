@@ -10,7 +10,7 @@ on:
 # Deliberately separate from the read-only reviewer. This workflow can only
 # read its trusted artifact and maintain candidate Issues.
 permissions:
-  actions: read
+  actions: write
   issues: write
 
 jobs:
@@ -63,6 +63,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Publish candidate record
+        id: candidate
         uses: actions/github-script@v7
         env:
           SOURCE_RUN_ID: ${{ steps.source.outputs.run-id }}
@@ -224,3 +225,51 @@ jobs:
               await github.rest.issues.update({ ...context.repo, issue_number: duplicate.number, state: 'closed' });
             }
             core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);
+            const canonicalLabels = new Set((canonical.labels || []).map((label) => typeof label === 'string' ? label : label.name));
+            if (canonical.state !== 'closed' && canonicalLabels.has('SI-후보') && canonicalLabels.has('SI-승인') &&
+                !canonicalLabels.has('SI-보류') && !canonicalLabels.has('SI-거절')) {
+              fs.writeFileSync('candidate-artifact/publisher-dispatch.json', JSON.stringify({
+                schemaVersion: 1,
+                candidateIssue: canonical.number,
+                candidateKey: key,
+                reviewRunId: Number(process.env.SOURCE_RUN_ID),
+                sourceMergeSha: publication.verifiedMergeSha,
+                publisherRunId: context.runId,
+              }));
+              core.setOutput('dispatch', 'true');
+              core.setOutput('candidate-issue', String(canonical.number));
+              core.setOutput('candidate-key', key);
+              core.setOutput('source-sha', publication.verifiedMergeSha);
+            }
+
+      - name: Upload immutable Publisher dispatch provenance
+        if: steps.candidate.outputs.dispatch == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: autonomous-dispatch-${{ github.run_id }}
+          path: candidate-artifact/publisher-dispatch.json
+          if-no-files-found: error
+
+      - name: Dispatch autonomous implementation
+        if: steps.candidate.outputs.dispatch == 'true'
+        uses: actions/github-script@v7
+        env:
+          CANDIDATE_ISSUE: ${{ steps.candidate.outputs.candidate-issue }}
+          CANDIDATE_KEY: ${{ steps.candidate.outputs.candidate-key }}
+          SOURCE_SHA: ${{ steps.candidate.outputs.source-sha }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run-id }}
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo,
+              workflow_id: 'autonomous-implementation.yml',
+              ref: 'main',
+              inputs: {
+                candidate_issue: process.env.CANDIDATE_ISSUE,
+                candidate_key: process.env.CANDIDATE_KEY,
+                review_run_id: process.env.SOURCE_RUN_ID,
+                source_merge_sha: process.env.SOURCE_SHA,
+                publisher_run_id: String(context.runId),
+              },
+            });
+            core.info(`Dispatched autonomous implementation for Candidate #${process.env.CANDIDATE_ISSUE}`);
