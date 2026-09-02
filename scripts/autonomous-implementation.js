@@ -48,7 +48,7 @@ function validateManifest(manifest, dispatch, patch, currentBaseSha) {
   if (!manifest || manifest.schemaVersion !== 1 || manifest.candidateKey !== dispatch.candidateKey ||
       manifest.candidateIssueNumber !== dispatch.candidateIssueNumber || manifest.baseSha !== dispatch.sourceMergeSha ||
       currentBaseSha !== manifest.baseSha || manifest.patchSha256 !== patchDigest(patch) ||
-      manifest.tests !== 'npm test: PASS') throw new Error('Implementation artifact validation failed');
+      manifest.tests !== 'trusted base test entry point: PASS') throw new Error('Implementation artifact validation failed');
   if (!patch.trim()) throw new Error('Implementation patch is empty');
   return true;
 }
@@ -67,7 +67,7 @@ if (require.main === module) {
     validateDispatch(dispatch);
     writeFileSync('implementation-manifest.json', JSON.stringify({ schemaVersion: 1, candidateKey: dispatch.candidateKey,
       candidateIssueNumber: dispatch.candidateIssueNumber, baseSha: dispatch.sourceMergeSha,
-      patchSha256: patchDigest(patch), tests: 'npm test: PASS' }, null, 2));
+      patchSha256: patchDigest(patch), tests: 'trusted base test entry point: PASS' }, null, 2));
   } else throw new Error(`Unknown command: ${command}`);
 }
 

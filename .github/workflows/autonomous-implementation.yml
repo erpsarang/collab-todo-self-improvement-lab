@@ -47,6 +47,15 @@ jobs:
             if (exact.length !== 1) throw new Error(`Expected at most one Candidate dispatch, found ${exact.length}`);
             core.setOutput('has-dispatch', 'true');
             core.setOutput('run-id', String(run.id));
+      # Checkout must precede artifact download: checkout cleans an unversioned
+      # workspace and would otherwise remove the trusted dispatch.
+      - name: Check out trusted implementation base
+        if: steps.publisher.outputs.has-dispatch == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
       - name: Download exact Candidate dispatch
         if: steps.publisher.outputs.has-dispatch == 'true'
         uses: actions/download-artifact@v4
@@ -55,13 +64,6 @@ jobs:
           path: candidate-dispatch
           run-id: ${{ steps.publisher.outputs.run-id }}
           github-token: ${{ github.token }}
-      - name: Check out trusted implementation base
-        if: steps.publisher.outputs.has-dispatch == 'true'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
       - name: Evaluate eligibility from trusted metadata
         if: steps.publisher.outputs.has-dispatch == 'true'
         id: eligibility
@@ -85,6 +87,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Capture trusted base test entry point
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          node - <<'NODE'
+          const { readFileSync, writeFileSync } = require('node:fs');
+          const { join } = require('node:path');
+          const command = JSON.parse(readFileSync('package.json', 'utf8')).scripts?.test;
+          if (typeof command !== 'string' || !command.trim()) throw new Error('Trusted base has no test entry point');
+          writeFileSync(join(process.env.RUNNER_TEMP, 'trusted-test-command'), command, { mode: 0o500 });
+          NODE
       - name: Prepare trusted implementation prompt
         if: steps.eligibility.outputs.eligible == 'true'
         run: node scripts/autonomous-implementation.js prepare
@@ -97,7 +109,9 @@ jobs:
           sandbox: workspace-write
       - name: Run full test suite
         if: steps.eligibility.outputs.eligible == 'true'
-        run: npm install && npm test
+        # Never invoke the Candidate-controlled package.json test script. Execute
+        # the entry point captured from the trusted base with npm's local tools.
+        run: npm install && PATH="$PWD/node_modules/.bin:$PATH" bash -eo pipefail "$RUNNER_TEMP/trusted-test-command"
       - name: Build verifiable implementation artifact
         if: steps.eligibility.outputs.eligible == 'true'
         run: |
@@ -214,6 +228,6 @@ jobs:
         with:
           script: |
             const { implementationMarker } = require('./scripts/autonomous-implementation');
-            const body = `${implementationMarker(process.env.KEY)}\n\nCandidate Issue: #${process.env.ISSUE}\nCandidate Key: ${process.env.KEY}\nSource Review run: ${process.env.REVIEW_RUN}\nSource merge SHA: ${process.env.BASE_SHA}\nTests: npm test (PASS)\n\nCloses #${process.env.ISSUE}`;
+            const body = `${implementationMarker(process.env.KEY)}\n\nCandidate Issue: #${process.env.ISSUE}\nCandidate Key: ${process.env.KEY}\nSource Review run: ${process.env.REVIEW_RUN}\nSource merge SHA: ${process.env.BASE_SHA}\nTests: trusted base test entry point (PASS)\n\nCloses #${process.env.ISSUE}`;
             await github.rest.pulls.create({ ...context.repo, head: process.env.BRANCH, base: 'main',
               title: `Implement Candidate #${process.env.ISSUE}: ${process.env.TITLE}`, body });

@@ -33,7 +33,7 @@ test('tampered metadata and changed base stop safely', () => {
 test('manifest binds a successful test result, exact base, Candidate, and patch', () => {
   const patch = 'diff --git a/a b/a\n';
   const manifest = { schemaVersion: 1, candidateKey: dispatch.candidateKey, candidateIssueNumber: 23,
-    baseSha: sha, patchSha256: patchDigest(patch), tests: 'npm test: PASS' };
+    baseSha: sha, patchSha256: patchDigest(patch), tests: 'trusted base test entry point: PASS' };
   assert.equal(validateManifest(manifest, dispatch, patch, sha), true);
   assert.throws(() => validateManifest(manifest, dispatch, `${patch}tamper`, sha));
 });
@@ -123,4 +123,33 @@ test('workflow treats a trusted publisher run without a dispatch as a safe no-op
   assert.match(workflow, /Download exact Candidate dispatch\n\s+if: steps\.publisher\.outputs\.has-dispatch == 'true'/);
   assert.match(workflow, /Evaluate eligibility from trusted metadata\n\s+if: steps\.publisher\.outputs\.has-dispatch == 'true'/);
   assert.match(workflow, /exact\.length !== 1[\s\S]*throw new Error/);
+});
+
+test('checkout precedes dispatch download so eligibility can read the artifact', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  const checkout = workflow.indexOf('- name: Check out trusted implementation base');
+  const download = workflow.indexOf('- name: Download exact Candidate dispatch');
+  const eligibility = workflow.indexOf('- name: Evaluate eligibility from trusted metadata');
+  assert.ok(checkout >= 0 && checkout < download && download < eligibility);
+  assert.match(workflow.slice(download, eligibility), /path: candidate-dispatch/);
+  assert.match(workflow.slice(eligibility), /readFileSync\('candidate-dispatch\/candidate-dispatch\.json'/);
+});
+
+test('Candidate test-script weakening cannot replace the trusted base test command', () => {
+  const root = mkdtempSync(join(tmpdir(), 'autonomous-trusted-tests-'));
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node failing.test.js' } }));
+    const trusted = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).scripts.test;
+    writeFileSync(join(root, 'failing.test.js'), "const test=require('node:test'); test('trusted failure',()=>{throw Error('fail')})\n");
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'true' } }));
+
+    assert.doesNotThrow(() => execFileSync('npm', ['test'], { cwd: root, stdio: 'pipe' }));
+    assert.throws(() => execFileSync('bash', ['-eo', 'pipefail', '-c', trusted], { cwd: root, stdio: 'pipe' }));
+    const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+    assert.match(workflow, /Capture trusted base test entry point[\s\S]*trusted-test-command[\s\S]*Implement Candidate/);
+    assert.match(workflow, /bash -eo pipefail \"\$RUNNER_TEMP\/trusted-test-command\"/);
+    assert.doesNotMatch(workflow, /run: npm install && npm test/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
