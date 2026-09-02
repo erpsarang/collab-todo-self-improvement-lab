@@ -1,0 +1,185 @@
+name: Autonomous Candidate Implementation
+
+on:
+  workflow_run:
+    workflows: [Self-Improvement Candidate Publisher]
+    types: [completed]
+
+# Serialize dispatches so duplicate observations converge before any branch is published.
+concurrency:
+  group: autonomous-candidate-implementation
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  implement:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.eligibility.outputs.eligible }}
+    steps:
+      - name: Verify trusted publisher run
+        id: publisher
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expected = context.payload.workflow_run;
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: expected.id });
+            if (run.id !== expected.id || run.name !== 'Self-Improvement Candidate Publisher' ||
+                run.path !== '.github/workflows/self-improvement-candidate-publisher.yml' || run.event !== 'workflow_run' ||
+                run.conclusion !== 'success' || run.head_branch !== 'main' || run.head_sha !== expected.head_sha) {
+              throw new Error('Untrusted Candidate Publisher provenance');
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              { ...context.repo, run_id: run.id, per_page: 100 });
+            const exact = artifacts.filter(({ name, expired }) => name === 'candidate-dispatch' && !expired);
+            if (exact.length !== 1) throw new Error(`Expected exactly one Candidate dispatch, found ${exact.length}`);
+            core.setOutput('run-id', String(run.id));
+      - name: Download exact Candidate dispatch
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-dispatch
+          path: candidate-dispatch
+          run-id: ${{ steps.publisher.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Check out trusted implementation base
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Evaluate eligibility from trusted metadata
+        id: eligibility
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { eligibility, implementationMarker, validateDispatch } = require('./scripts/autonomous-implementation');
+            const dispatch = validateDispatch(JSON.parse(fs.readFileSync('candidate-dispatch/candidate-dispatch.json', 'utf8')));
+            const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number: dispatch.candidateIssueNumber });
+            const { data: main } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
+            const decision = eligibility(dispatch, issue, main.object.sha);
+            if (!decision.eligible) { core.notice(`Safe stop: ${decision.reason}`); core.setOutput('eligible', 'false'); return; }
+            const pulls = await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 });
+            if (pulls.some(({ body }) => String(body || '').includes(implementationMarker(dispatch.candidateKey)))) {
+              core.notice('Safe stop: an active implementation PR already exists'); core.setOutput('eligible', 'false'); return;
+            }
+            core.setOutput('eligible', 'true');
+      - name: Set up Node.js
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Prepare trusted implementation prompt
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: node scripts/autonomous-implementation.js prepare
+      - name: Implement Candidate without repository credentials
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: autonomous-implementation-prompt.md
+          sandbox: workspace-write
+      - name: Run full test suite
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: npm install && npm test
+      - name: Build verifiable implementation artifact
+        if: steps.eligibility.outputs.eligible == 'true'
+        run: |
+          cp candidate-dispatch/candidate-dispatch.json /tmp/candidate-dispatch.json
+          rm -rf autonomous-implementation-prompt.md candidate-dispatch
+          git add --intent-to-add .
+          git diff --binary --full-index --no-ext-diff > implementation.patch
+          test -s implementation.patch
+          mkdir candidate-dispatch
+          cp /tmp/candidate-dispatch.json candidate-dispatch/candidate-dispatch.json
+          node scripts/autonomous-implementation.js manifest
+      - name: Upload implementation artifact
+        if: steps.eligibility.outputs.eligible == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-implementation
+          path: |
+            implementation.patch
+            implementation-manifest.json
+            candidate-dispatch/candidate-dispatch.json
+          if-no-files-found: error
+
+  publish:
+    needs: implement
+    if: needs.implement.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate-implementation
+          path: candidate-implementation
+      - name: Validate base, patch, and duplicate state
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const { execFileSync } = require('node:child_process');
+            const { implementationMarker, validateDispatch, validateManifest } = require('./scripts/autonomous-implementation');
+            const root = 'candidate-implementation/';
+            const dispatch = validateDispatch(JSON.parse(fs.readFileSync(`${root}candidate-dispatch.json`, 'utf8')));
+            const manifest = JSON.parse(fs.readFileSync(`${root}implementation-manifest.json`, 'utf8'));
+            const patch = fs.readFileSync(`${root}implementation.patch`, 'utf8');
+            const { data: main } = await github.rest.git.getRef({ ...context.repo, ref: 'heads/main' });
+            validateManifest(manifest, dispatch, patch, main.object.sha);
+            const changed = execFileSync('git', ['apply', '--numstat', `${root}implementation.patch`], { encoding: 'utf8' });
+            if (changed.split('\n').some((line) => /(?:^|\t)\.github\//u.test(line))) throw new Error('Workflow changes are not publishable');
+            execFileSync('git', ['apply', '--check', `${root}implementation.patch`]);
+            const pulls = await github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 });
+            if (pulls.some(({ body }) => String(body || '').includes(implementationMarker(dispatch.candidateKey)))) {
+              core.notice('An implementation PR already exists; publishing is unnecessary'); core.setOutput('publish', 'false'); return;
+            }
+            core.setOutput('publish', 'true');
+            core.setOutput('branch', `codex/autonomous-${dispatch.candidateKey.slice(7, 23)}`);
+            core.setOutput('issue', String(dispatch.candidateIssueNumber));
+            core.setOutput('key', dispatch.candidateKey);
+            core.setOutput('review-run', String(dispatch.sourceReviewRunId));
+            core.setOutput('base-sha', dispatch.sourceMergeSha);
+            core.setOutput('title', dispatch.title);
+      - name: Apply validated patch and publish branch
+        if: steps.validate.outputs.publish == 'true'
+        env:
+          BRANCH: ${{ steps.validate.outputs.branch }}
+        run: |
+          git apply --index candidate-implementation/implementation.patch
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Implement validated self-improvement Candidate"
+          git push origin "HEAD:refs/heads/$BRANCH"
+      - name: Create implementation pull request
+        if: steps.validate.outputs.publish == 'true'
+        uses: actions/github-script@v7
+        env:
+          BRANCH: ${{ steps.validate.outputs.branch }}
+          ISSUE: ${{ steps.validate.outputs.issue }}
+          KEY: ${{ steps.validate.outputs.key }}
+          REVIEW_RUN: ${{ steps.validate.outputs.review-run }}
+          BASE_SHA: ${{ steps.validate.outputs.base-sha }}
+          TITLE: ${{ steps.validate.outputs.title }}
+        with:
+          script: |
+            const { implementationMarker } = require('./scripts/autonomous-implementation');
+            const body = `${implementationMarker(process.env.KEY)}\n\nCandidate Issue: #${process.env.ISSUE}\nCandidate Key: ${process.env.KEY}\nSource Review run: ${process.env.REVIEW_RUN}\nSource merge SHA: ${process.env.BASE_SHA}\nTests: npm test (PASS)\n\nCloses #${process.env.ISSUE}`;
+            await github.rest.pulls.create({ ...context.repo, head: process.env.BRANCH, base: 'main',
+              title: `Implement Candidate #${process.env.ISSUE}: ${process.env.TITLE}`, body });

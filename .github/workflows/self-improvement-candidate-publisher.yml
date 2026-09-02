@@ -223,4 +223,26 @@ jobs:
               });
               await github.rest.issues.update({ ...context.repo, issue_number: duplicate.number, state: 'closed' });
             }
+            const dispatch = {
+              schemaVersion: 1,
+              candidateIssueNumber: canonical.number,
+              candidateKey: key,
+              sourceReviewRunId: Number(process.env.SOURCE_RUN_ID),
+              sourceMergeSha: publication.verifiedMergeSha,
+              publicationResult: publication.result,
+              verificationStatus: publication.verificationStatus,
+              totalScore: publication.total,
+              title: publication.title,
+              suggestedScope: publication.suggestedScope,
+              nonGoals: publication.nonGoals,
+            };
+            fs.writeFileSync('candidate-dispatch.json', JSON.stringify(dispatch, null, 2));
             core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);
+
+      - name: Upload trusted Candidate dispatch
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-dispatch
+          path: candidate-dispatch.json
+          if-no-files-found: ignore
+          retention-days: 7
