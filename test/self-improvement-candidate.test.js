@@ -91,6 +91,81 @@ test('publisher preserves validated multiline metadata in the registry Issue bod
   assert.match(created.body, /## Evidence\n- First evidence line\n```markdown\n## Impact/);
 });
 
+test('publisher uses a validated create response when list visibility remains delayed', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-visibility-fallback-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(candidatePublication({
+    title: 'Survive delayed list visibility',
+  })));
+  let listCalls = 0;
+  const created = { number: 41, body: '', comments: [] };
+  const api = {
+    getLabel: async () => ({}), createLabel: async () => ({}),
+    listForRepo: async () => { listCalls += 1; return { data: [] }; },
+    create: async (input) => { Object.assign(created, input); return { data: created }; },
+    listComments: async () => ({ data: created.comments }),
+    createComment: async ({ body }) => { created.comments.push({ body }); },
+    removeLabel: async () => {}, update: async () => {},
+  };
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await new Function('require', 'github', 'context', 'core', 'process', `return (async () => {\n${script}\n})()`)(
+      require, { paginate: async (method, input) => (await method(input)).data, rest: { issues: api } },
+      { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: '1001' } },
+    );
+  } finally {
+    process.chdir(previousCwd);
+  }
+  assert.equal(listCalls, 4, 'one pre-create lookup and three bounded reconciliation lookups are expected');
+  assert.equal(candidateKeyFromRegistryBody(created.body), candidateKey('Survive delayed list visibility'));
+});
+
+test('publisher reconciles a duplicate that becomes visible on a bounded follow-up lookup', async () => {
+  const script = workflowScript(workflow(), 'Publish candidate record');
+  const publication = candidatePublication({ title: 'Reconcile delayed duplicate' });
+  const directory = mkdtempSync(join(tmpdir(), 'candidate-visibility-reconcile-'));
+  mkdirSync(join(directory, 'candidate-artifact'));
+  writeFileSync(join(directory, 'candidate-artifact/self-improvement-publication.json'), JSON.stringify(publication));
+  const issues = [];
+  let listCalls = 0;
+  const api = {
+    getLabel: async () => ({}), createLabel: async () => ({}),
+    listForRepo: async () => {
+      listCalls += 1;
+      if (listCalls <= 2) return { data: [] };
+      return { data: issues.filter(({ labels }) => labels.includes('SI-후보')) };
+    },
+    create: async (input) => {
+      const created = { ...input, number: 12, comments: [] };
+      issues.push(created, { ...input, number: 7, comments: [] });
+      return { data: created };
+    },
+    listComments: async ({ issue_number }) => ({ data: issues.find(({ number }) => number === issue_number).comments }),
+    createComment: async ({ issue_number, body }) => { issues.find(({ number }) => number === issue_number).comments.push({ body }); },
+    removeLabel: async ({ issue_number, name }) => {
+      const issue = issues.find(({ number }) => number === issue_number);
+      issue.labels = issue.labels.filter((label) => label !== name);
+    },
+    update: async ({ issue_number, state }) => { issues.find(({ number }) => number === issue_number).state = state; },
+  };
+  const previousCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    await new Function('require', 'github', 'context', 'core', 'process', `return (async () => {\n${script}\n})()`)(
+      require, { paginate: async (method, input) => (await method(input)).data, rest: { issues: api } },
+      { repo: {} }, { info() {} }, { env: { SOURCE_RUN_ID: '1002' } },
+    );
+  } finally {
+    process.chdir(previousCwd);
+  }
+  assert.equal(listCalls, 3, 'reconciliation stops once the created record is visible');
+  assert.deepEqual(issues.find(({ number }) => number === 7).labels, ['SI-후보', 'SI-승인대기']);
+  assert.deepEqual(issues.find(({ number }) => number === 12).labels, ['SI-승인대기']);
+  assert.equal(issues.find(({ number }) => number === 12).state, 'closed');
+});
+
 test('concurrent publishers tolerate an already-created registry label without losing either observation', async () => {
   const script = workflowScript(workflow(), 'Publish candidate record');
   const directory = mkdtempSync(join(tmpdir(), 'candidate-label-race-'));
