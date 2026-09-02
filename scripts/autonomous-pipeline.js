@@ -108,6 +108,32 @@ function validatePublisherDispatch(dispatch, expected) {
   }
 }
 
+function validateCandidatePublication(value, expected) {
+  validatePublisherDispatch(value, expected);
+  const scoreNames = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
+  if (value.verificationStatus !== 'PASS' || !value.scores ||
+      scoreNames.some((name) => !Number.isInteger(value.scores[name]) || value.scores[name] < 0 || value.scores[name] > 3) ||
+      scoreNames.reduce((sum, name) => sum + value.scores[name], 0) !== value.eligibilityScore ||
+      value.eligibilityScore < 9 || value.scores['Evidence Strength'] < 2 ||
+      Math.max(value.scores['User Impact'], value.scores['Reliability Impact'], value.scores['Collaboration Impact']) < 3) {
+    throw new Error('Trusted Candidate publication is not verified and eligible');
+  }
+  return value;
+}
+
+function approvalEventEligible(payload) {
+  return payload?.action === 'labeled' && payload?.label?.name === 'SI-승인' && eligibleCandidate(payload.issue);
+}
+
+function hasActiveAutonomousWork({ runs = [], branches = [], pullRequests = [] }, expected) {
+  const titleMarker = `candidate-key:${expected.candidateKey}`;
+  if (runs.some((run) => ['queued', 'in_progress'].includes(run.status) &&
+      run.event === 'workflow_dispatch' && String(run.display_title || '').includes(titleMarker))) return true;
+  const branchPrefix = `automation/self-improvement/${expected.candidateIssue}-`;
+  if (branches.some((branch) => String(branch.name || '').startsWith(branchPrefix))) return true;
+  return pullRequests.some((pr) => isOwnedDuplicate(pr, expected));
+}
+
 function parsePatchPaths(patch) {
   const paths = [];
   for (const line of String(patch).split(/\r?\n/u)) {
@@ -197,5 +223,6 @@ async function waitForPublisher(getRun, runId, { attempts = 8, delay = async () 
 function readJson(path) { return JSON.parse(readFileSync(path, 'utf8')); }
 
 module.exports = { assertPatchScope, assertPublishable, assertTrustedTests, createAttestation,
-  eligibleCandidate, equalHash, implementationPrompt, isOwnedDuplicate, parsePatchPaths, readJson, sha256, validateIdentity,
-  validatePatch, validatePublisherDispatch, validateReviewProvenance, waitForPublisher };
+  approvalEventEligible, eligibleCandidate, equalHash, hasActiveAutonomousWork, implementationPrompt, isOwnedDuplicate,
+  parsePatchPaths, readJson, sha256, validateCandidatePublication, validateIdentity, validatePatch,
+  validatePublisherDispatch, validateReviewProvenance, waitForPublisher };

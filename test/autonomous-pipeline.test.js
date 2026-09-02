@@ -14,6 +14,56 @@ const approvedPublication = (overrides = {}) => ({
   observation: 'Approved summary.', evidence: 'Approved evidence.', impact: 'Approved impact.',
   suggestedScope: 'Approved scope.', nonGoals: 'Approved exclusions.', ...overrides,
 });
+const approvalProvenance = (overrides = {}) => ({
+  schemaVersion: 1, candidateIssue: 23, candidateKey: key, reviewRunId: 10,
+  sourceMergeSha: base, publisherRunId: 20, verificationStatus: 'PASS', eligibilityScore: 9,
+  scores: { 'User Impact': 3, 'Reliability Impact': 1, 'Collaboration Impact': 1,
+    'Evidence Strength': 2, Urgency: 2 }, ...overrides,
+});
+
+test('new SI-승인 label dispatch gate accepts an approved waiting Candidate', () => {
+  const payload = { action: 'labeled', label: { name: 'SI-승인' },
+    issue: { state: 'open', labels: ['SI-후보', 'SI-승인'].map((name) => ({ name })) } };
+  assert.equal(p.approvalEventEligible(payload), true);
+  assert.doesNotThrow(() => p.validateCandidatePublication(approvalProvenance(), approvalProvenance()));
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-approval-dispatch.yml'), 'utf8');
+  assert.match(workflow, /createWorkflowDispatch[\s\S]*workflow_id: 'autonomous-implementation\.yml'/u);
+});
+
+test('approval dispatch rejects held and rejected Candidates', () => {
+  for (const blocked of ['SI-보류', 'SI-거절']) {
+    const payload = { action: 'labeled', label: { name: 'SI-승인' }, issue: { state: 'open',
+      labels: ['SI-후보', 'SI-승인', blocked] } };
+    assert.equal(p.approvalEventEligible(payload), false);
+  }
+});
+
+test('approval dispatch fails closed without trusted provenance or with a Candidate Key mismatch', () => {
+  assert.throws(() => p.validateCandidatePublication(undefined, approvalProvenance()), /provenance mismatch/u);
+  assert.throws(() => p.validateCandidatePublication(approvalProvenance(),
+    approvalProvenance({ candidateKey: `sha256:${'f'.repeat(64)}` })), /provenance mismatch/u);
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-approval-dispatch.yml'), 'utf8');
+  assert.match(workflow, /No trusted Publisher provenance found/u);
+  assert.doesNotMatch(workflow, /issue\.body|listComments|createComment/u);
+});
+
+test('approval dispatch suppresses duplicate active autonomous PRs, branches, and runs', () => {
+  const expected = { candidateIssue: 23, candidateKey: key, repository: 'o/r', actor: 'github-actions[bot]' };
+  const pr = { state: 'open', body: `<!-- autonomous-candidate-key: ${key} -->`,
+    user: { login: 'github-actions[bot]' }, head: { ref: 'automation/self-improvement/23-20',
+      repo: { full_name: 'o/r' } } };
+  assert.equal(p.hasActiveAutonomousWork({ pullRequests: [pr] }, expected), true);
+  assert.equal(p.hasActiveAutonomousWork({ branches: [{ name: 'automation/self-improvement/23-19' }] }, expected), true);
+  assert.equal(p.hasActiveAutonomousWork({ runs: [{ status: 'in_progress', event: 'workflow_dispatch',
+    display_title: `Autonomous Candidate #23 candidate-key:${key}` }] }, expected), true);
+  assert.equal(p.hasActiveAutonomousWork({}, expected), false);
+});
+
+test('approval dispatch ignores labels other than SI-승인', () => {
+  const payload = { action: 'labeled', label: { name: 'SI-승인대기' },
+    issue: { state: 'open', labels: ['SI-후보', 'SI-승인'] } };
+  assert.equal(p.approvalEventEligible(payload), false);
+});
 
 test('normal Candidate produces a hash-bound implementation artifact and trusted attestation', () => {
   const value = identity();
