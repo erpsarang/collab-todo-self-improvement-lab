@@ -40,11 +40,59 @@ function validateReviewProvenance(run, publication, { reviewRunId, sourceMergeSh
     throw new Error('Untrusted Review run provenance');
   }
   if (!publication || publication.schemaVersion !== 1 || publication.result !== 'CANDIDATE' ||
-      publication.verifiedMergeSha !== sourceMergeSha || typeof publication.title !== 'string' || !publication.title) {
+      publication.verifiedMergeSha !== sourceMergeSha) {
     throw new Error('Review artifact provenance mismatch');
+  }
+  const approvedFields = ['title', 'observation', 'evidence', 'impact', 'suggestedScope', 'nonGoals'];
+  if (approvedFields.some((field) => typeof publication[field] !== 'string' || !publication[field])) {
+    throw new Error('Review artifact approved content is incomplete');
   }
   const normalizedTitle = publication.title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
   if (`sha256:${sha256(normalizedTitle)}` !== candidateKey) throw new Error('Review artifact Candidate key mismatch');
+}
+
+function implementationPrompt(publication, { candidateIssue, candidateKey, reviewRunId, sourceMergeSha }) {
+  if (!Number.isSafeInteger(candidateIssue) || candidateIssue <= 0 ||
+      !Number.isSafeInteger(reviewRunId) || reviewRunId <= 0 ||
+      !KEY.test(candidateKey) || !SHA.test(sourceMergeSha)) {
+    throw new Error('Implementation prompt provenance is invalid');
+  }
+  if (!publication || publication.schemaVersion !== 1 || publication.result !== 'CANDIDATE' ||
+      publication.verifiedMergeSha !== sourceMergeSha) {
+    throw new Error('Implementation prompt Review artifact mismatch');
+  }
+  const approvedFields = ['title', 'observation', 'evidence', 'impact', 'suggestedScope', 'nonGoals'];
+  if (approvedFields.some((field) => typeof publication[field] !== 'string' || !publication[field])) {
+    throw new Error('Implementation prompt approved content is incomplete');
+  }
+  const normalizedTitle = publication.title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
+  if (`sha256:${sha256(normalizedTitle)}` !== candidateKey) throw new Error('Implementation prompt Candidate key mismatch');
+  return `Implement the exact approved Candidate below without changing .github, committing, or pushing. Add regression tests.
+
+## Trusted provenance
+- Candidate Issue number: ${candidateIssue}
+- Candidate Key: ${candidateKey}
+- Review run ID: ${reviewRunId}
+- Verified source merge SHA: ${sourceMergeSha}
+
+## Approved Candidate title
+${publication.title}
+
+## Approved Candidate summary
+${publication.observation}
+
+## Approved evidence
+${publication.evidence}
+
+## Approved impact
+${publication.impact}
+
+## Approved Suggested Scope
+${publication.suggestedScope}
+
+## Approved Non-Goals
+${publication.nonGoals}
+`;
 }
 
 function validatePublisherDispatch(dispatch, expected) {
@@ -149,5 +197,5 @@ async function waitForPublisher(getRun, runId, { attempts = 8, delay = async () 
 function readJson(path) { return JSON.parse(readFileSync(path, 'utf8')); }
 
 module.exports = { assertPatchScope, assertPublishable, assertTrustedTests, createAttestation,
-  eligibleCandidate, equalHash, isOwnedDuplicate, parsePatchPaths, readJson, sha256, validateIdentity,
+  eligibleCandidate, equalHash, implementationPrompt, isOwnedDuplicate, parsePatchPaths, readJson, sha256, validateIdentity,
   validatePatch, validatePublisherDispatch, validateReviewProvenance, waitForPublisher };

@@ -59,19 +59,26 @@ jobs:
               sourceMergeSha: '${{ inputs.source_merge_sha }}',
               candidateKey: '${{ inputs.candidate_key }}',
             });
-            const issueNumber = Number('${{ inputs.candidate_issue }}');
-            policy.validatePublisherDispatch(policy.readJson('/tmp/publisher-artifact/publisher-dispatch.json'), {
-              candidateIssue: issueNumber,
+            const requestedIssueNumber = Number('${{ inputs.candidate_issue }}');
+            const dispatch = policy.readJson('/tmp/publisher-artifact/publisher-dispatch.json');
+            policy.validatePublisherDispatch(dispatch, {
+              candidateIssue: requestedIssueNumber,
               candidateKey: '${{ inputs.candidate_key }}',
               reviewRunId,
               sourceMergeSha: '${{ inputs.source_merge_sha }}',
               publisherRunId: runId,
             });
+            const issueNumber = dispatch.candidateIssue;
             const issue = (await github.rest.issues.get({ ...context.repo, issue_number: issueNumber })).data;
             if (!policy.eligibleCandidate(issue)) {
               throw new Error('Dispatch does not identify an eligible Candidate');
             }
-            fs.writeFileSync('candidate-prompt.md', `Implement the following approved Candidate without changing .github, committing, or pushing. Add regression tests.\n\n${issue.body}`);
+            fs.writeFileSync('candidate-prompt.md', policy.implementationPrompt(publication, {
+              candidateIssue: issueNumber,
+              candidateKey: dispatch.candidateKey,
+              reviewRunId: dispatch.reviewRunId,
+              sourceMergeSha: publication.verifiedMergeSha,
+            }));
       - name: Run Codex in untrusted workspace
         uses: openai/codex-action@v1
         with:
