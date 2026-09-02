@@ -1,0 +1,161 @@
+name: Autonomous Implementation Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_issue: { required: true, type: string }
+      candidate_key: { required: true, type: string }
+      review_run_id: { required: true, type: string }
+      source_merge_sha: { required: true, type: string }
+      publisher_run_id: { required: true, type: string }
+
+permissions: {}
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ inputs.source_merge_sha }}', persist-credentials: false }
+      - name: Validate trusted dispatch and wait for Publisher completion
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const policy = require('./scripts/autonomous-pipeline');
+            const runId = Number('${{ inputs.publisher_run_id }}');
+            const publisher = await policy.waitForPublisher(async (id) => (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: id })).data,
+              runId, { delay: (attempt) => new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1))) });
+            if (publisher.head_sha !== '${{ inputs.source_merge_sha }}' || context.sha !== '${{ inputs.source_merge_sha }}') throw new Error('Dispatch base SHA mismatch');
+            const issueNumber = Number('${{ inputs.candidate_issue }}');
+            const issue = (await github.rest.issues.get({ ...context.repo, issue_number: issueNumber })).data;
+            if (!policy.eligibleCandidate(issue) || !String(issue.body || '').startsWith(`<!-- self-improvement-candidate-key: ${{ inputs.candidate_key }} -->`)) {
+              throw new Error('Dispatch does not identify an eligible Candidate');
+            }
+            const observations = [issue.body, ...(await github.paginate(github.rest.issues.listComments, { ...context.repo, issue_number: issueNumber, per_page: 100 })).map(({ body }) => body)].join('\n');
+            if (!observations.includes(`<!-- self-improvement-review-run: ${{ inputs.review_run_id }} -->`) ||
+                !observations.includes(`Source merge SHA: \`${{ inputs.source_merge_sha }}\``)) throw new Error('Candidate provenance mismatch');
+            fs.writeFileSync('candidate-prompt.md', `Implement the following approved Candidate without changing .github, committing, or pushing. Add regression tests.\n\n${issue.body}`);
+      - name: Preserve trusted policy and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
+          find test -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/trusted/base-tests.sha256
+      - name: Run Codex in untrusted workspace
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: candidate-prompt.md
+          sandbox: workspace-write
+      - name: Create immutable implementation artifact
+        shell: bash
+        env:
+          CANDIDATE_KEY: '${{ inputs.candidate_key }}'
+          REVIEW_RUN_ID: '${{ inputs.review_run_id }}'
+        run: |
+          set -euo pipefail
+          rm -f candidate-prompt.md
+          mkdir artifact
+          git add -A
+          git diff --cached --binary --full-index --no-ext-diff > artifact/implementation.patch
+          test -s artifact/implementation.patch
+          PATCH_SHA=$(sha256sum artifact/implementation.patch | cut -d' ' -f1)
+          jq -n --argjson issue '${{ inputs.candidate_issue }}' --arg key "$CANDIDATE_KEY" \
+            --argjson review "$REVIEW_RUN_ID" --arg source '${{ inputs.source_merge_sha }}' --arg base "$(git rev-parse HEAD)" \
+            --argjson implement '${{ github.run_id }}' --arg hash "$PATCH_SHA" \
+            '{schemaVersion:1,candidateIssue:$issue,candidateKey:$key,reviewRunId:$review,sourceMergeSha:$source,baseSha:$base,implementRunId:$implement,patchSha256:$hash}' > artifact/implementation.json
+          cp /tmp/trusted/base-tests.sha256 artifact/base-tests.sha256
+      - uses: actions/upload-artifact@v4
+        with: { name: 'implementation-${{ github.run_id }}', path: artifact, if-no-files-found: error }
+
+  verify:
+    needs: implement
+    runs-on: ubuntu-latest
+    permissions: { actions: read, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ inputs.source_merge_sha }}', persist-credentials: false }
+      - run: install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
+      - uses: actions/download-artifact@v4
+        with: { name: 'implementation-${{ github.run_id }}', path: /tmp/trusted/artifact }
+      - name: Verify immutable patch and protected tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export TRUSTED_BASE_SHA="$(git rev-parse HEAD)"
+          node - <<'NODE'
+          const p=require('/tmp/trusted/autonomous-pipeline'); const fs=require('fs');
+          const m=p.readJson('/tmp/trusted/artifact/implementation.json'); p.validateIdentity(m);
+          const patch=fs.readFileSync('/tmp/trusted/artifact/implementation.patch'); p.validatePatch(patch,m.patchSha256); p.assertPatchScope(patch);
+          if(m.implementRunId!==Number(process.env.GITHUB_RUN_ID)||m.baseSha!==process.env.TRUSTED_BASE_SHA) throw Error('Artifact run/base provenance mismatch');
+          NODE
+          git apply --index /tmp/trusted/artifact/implementation.patch
+          sha256sum --check /tmp/trusted/artifact/base-tests.sha256
+          cp package.json /tmp/trusted/package.json
+          git diff --cached --binary --full-index > /tmp/trusted/applied.patch
+          cmp /tmp/trusted/artifact/implementation.patch /tmp/trusted/applied.patch
+      - name: Install dependencies without lifecycle scripts
+        run: docker run --rm --network none -v "$PWD:/workspace" -w /workspace node:20 npm ci --ignore-scripts
+      - name: Run trusted base test entry point
+        run: docker run --rm --network none -v "$PWD:/workspace" -w /workspace node:20 node --test
+      - name: Fail if tests or implementation mutated the verified tree
+        run: |
+          sha256sum --check /tmp/trusted/artifact/base-tests.sha256
+          cmp package.json /tmp/trusted/package.json
+          git diff --cached --binary --full-index > /tmp/trusted/after.patch
+          cmp /tmp/trusted/artifact/implementation.patch /tmp/trusted/after.patch
+          test -z "$(git diff --name-only)"
+      - name: Create trusted verification attestation
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),p=require('/tmp/trusted/autonomous-pipeline'),m=p.readJson('/tmp/trusted/artifact/implementation.json');
+          fs.mkdirSync('/tmp/trusted/attestation'); fs.writeFileSync('/tmp/trusted/attestation/verification.json',JSON.stringify(p.createAttestation(m,m.patchSha256,Number(process.env.GITHUB_RUN_ID))));
+          NODE
+      - uses: actions/upload-artifact@v4
+        with: { name: 'verification-${{ github.run_id }}', path: /tmp/trusted/attestation, if-no-files-found: error }
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions: { actions: read, contents: write, issues: read, pull-requests: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0, persist-credentials: true }
+      - run: install -D scripts/autonomous-pipeline.js /tmp/trusted/autonomous-pipeline.js
+      - uses: actions/download-artifact@v4
+        with: { name: 'implementation-${{ github.run_id }}', path: /tmp/trusted/artifact }
+      - uses: actions/download-artifact@v4
+        with: { name: 'verification-${{ github.run_id }}', path: /tmp/trusted/attestation }
+      - name: Revalidate provenance, eligibility, and duplicate ownership
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs=require('fs'),p=require('/tmp/trusted/autonomous-pipeline');
+            const m=p.readJson('/tmp/trusted/artifact/implementation.json'),a=p.readJson('/tmp/trusted/attestation/verification.json'),patch=fs.readFileSync('/tmp/trusted/artifact/implementation.patch');
+            p.assertPublishable(m,a,patch,context.sha);
+            const issue=(await github.rest.issues.get({...context.repo,issue_number:m.candidateIssue})).data;
+            if(!p.eligibleCandidate(issue)) { core.notice('Candidate is no longer eligible; stopping safely'); core.setOutput('publish','false'); return; }
+            const prs=await github.paginate(github.rest.pulls.list,{...context.repo,state:'open',per_page:100});
+            if(prs.some(pr=>p.isOwnedDuplicate(pr,{candidateKey:m.candidateKey,repository:`${context.repo.owner}/${context.repo.repo}`,actor:'github-actions[bot]'}))) {
+              core.notice('Owned implementation PR already exists'); core.setOutput('publish','false'); return;
+            }
+            core.setOutput('publish','true'); core.setOutput('issue',String(m.candidateIssue)); core.setOutput('key',m.candidateKey);
+      - name: Apply exact verified patch and publish retryable branch
+        if: steps.gate.outputs.publish == 'true'
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          set -euo pipefail
+          git apply --check /tmp/trusted/artifact/implementation.patch
+          git apply --index /tmp/trusted/artifact/implementation.patch
+          BRANCH="automation/self-improvement/${{ steps.gate.outputs.issue }}-${{ github.run_id }}"
+          git switch -c "$BRANCH"
+          git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          gh pr create --base main --head "$BRANCH" --title "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}" \
+            --body $'<!-- autonomous-candidate-key: ${{ steps.gate.outputs.key }} -->\nImplements Candidate #${{ steps.gate.outputs.issue }} using the exact independently verified implementation artifact.'

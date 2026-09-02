@@ -10,7 +10,7 @@ on:
 # Deliberately separate from the read-only reviewer. This workflow can only
 # read its trusted artifact and maintain candidate Issues.
 permissions:
-  actions: read
+  actions: write
   issues: write
 
 jobs:
@@ -224,3 +224,20 @@ jobs:
               await github.rest.issues.update({ ...context.repo, issue_number: duplicate.number, state: 'closed' });
             }
             core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);
+            const canonicalLabels = new Set((canonical.labels || []).map((label) => typeof label === 'string' ? label : label.name));
+            if (canonical.state !== 'closed' && canonicalLabels.has('SI-후보') && canonicalLabels.has('SI-승인') &&
+                !canonicalLabels.has('SI-보류') && !canonicalLabels.has('SI-거절')) {
+              await github.rest.actions.createWorkflowDispatch({
+                ...context.repo,
+                workflow_id: 'autonomous-implementation.yml',
+                ref: 'main',
+                inputs: {
+                  candidate_issue: String(canonical.number),
+                  candidate_key: key,
+                  review_run_id: process.env.SOURCE_RUN_ID,
+                  source_merge_sha: publication.verifiedMergeSha,
+                  publisher_run_id: String(context.runId),
+                },
+              });
+              core.info(`Dispatched autonomous implementation for Candidate #${canonical.number}`);
+            }
