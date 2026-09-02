@@ -11,6 +11,12 @@ on:
 
 permissions: {}
 
+# The candidate key is immutable provenance supplied by the trusted Publisher.
+# Serialize the entire trust pipeline so duplicate checking and PR creation cannot race.
+concurrency:
+  group: autonomous-candidate-${{ inputs.candidate_key }}
+  cancel-in-progress: false
+
 jobs:
   implement:
     runs-on: ubuntu-latest
@@ -102,7 +108,7 @@ jobs:
       - name: Install dependencies without lifecycle scripts
         run: docker run --rm --network none -v "$PWD:/workspace" -w /workspace node:20 npm ci --ignore-scripts
       - name: Run trusted base test entry point
-        run: docker run --rm --network none -v "$PWD:/workspace" -w /workspace node:20 node --test
+        run: docker run --rm --network none --read-only -v "$PWD:/workspace:ro" --tmpfs /tmp -w /workspace node:20 node --test
       - name: Fail if tests or implementation mutated the verified tree
         run: |
           sha256sum --check /tmp/trusted/artifact/base-tests.sha256
@@ -162,6 +168,10 @@ jobs:
             test "$BASE_SHA" = "$VERIFIED_BASE_SHA"
             test "$VERIFIED_BASE_SHA" = "$CHECKED_OUT_SHA"
           }
+          candidate_is_eligible() {
+            gh api "repos/$GITHUB_REPOSITORY/issues/${{ steps.gate.outputs.issue }}" |
+              node -e "const p=require('/tmp/trusted/autonomous-pipeline');let s='';process.stdin.on('data',c=>s+=c).on('end',()=>process.exit(p.eligibleCandidate(JSON.parse(s))?0:1))"
+          }
           assert_base_invariant
           git apply --check /tmp/trusted/artifact/implementation.patch
           git apply --index /tmp/trusted/artifact/implementation.patch
@@ -169,6 +179,25 @@ jobs:
           git switch -c "$BRANCH"
           git -c user.name=github-actions[bot] -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}"
           assert_base_invariant
-          git push origin "HEAD:refs/heads/$BRANCH"
+          if ! candidate_is_eligible; then
+            echo 'Candidate is no longer eligible; stopping safely before publication'
+            exit 0
+          fi
+          LOCAL_TREE=$(git rev-parse HEAD^{tree})
+          if git fetch --no-tags origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"; then
+            REMOTE_SHA=$(git rev-parse "refs/remotes/origin/$BRANCH")
+            REMOTE_PARENT=$(git rev-parse "$REMOTE_SHA^")
+            REMOTE_TREE=$(git rev-parse "$REMOTE_SHA^{tree}")
+            test "$REMOTE_PARENT" = "$BASE_SHA"
+            test "$REMOTE_TREE" = "$LOCAL_TREE"
+            echo "Reusing verified remote branch at $REMOTE_SHA"
+          else
+            git push origin "HEAD:refs/heads/$BRANCH"
+          fi
+          assert_base_invariant
+          if ! candidate_is_eligible; then
+            echo 'Candidate is no longer eligible; stopping safely before PR creation'
+            exit 0
+          fi
           gh pr create --base main --head "$BRANCH" --title "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}" \
             --body $'<!-- autonomous-candidate-key: ${{ steps.gate.outputs.key }} -->\nImplements Candidate #${{ steps.gate.outputs.issue }} using the exact independently verified implementation artifact.'

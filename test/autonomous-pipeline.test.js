@@ -33,6 +33,12 @@ test('changed package test scripts, helpers, lifecycle scripts, and manifest gen
   assert.match(workflow, /require\('\/tmp\/trusted\/autonomous-pipeline'\)/u);
 });
 
+test('candidate-added tests run with the verified source mounted read-only', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  assert.match(workflow, /docker run --rm --network none --read-only -v "\$PWD:\/workspace:ro" --tmpfs \/tmp -w \/workspace node:20 node --test/u);
+  assert.doesNotMatch(workflow, /-v "\$PWD:\/workspace" -w \/workspace node:20 node --test/u);
+});
+
 test('tampered implementation patch fails VERIFY', () => {
   assert.throws(() => p.validatePatch(Buffer.from(`${patch}tamper`), identity().patchSha256), /hash mismatch/u);
 });
@@ -89,11 +95,22 @@ test('Publisher completion race uses bounded polling and accepts only successful
   for (const conclusion of ['failure', 'cancelled']) await assert.rejects(() => p.waitForPublisher(async () => ({ ...run, status: 'completed', conclusion }), 7), new RegExp(conclusion));
 });
 
-test('retryable run-specific branch and exact one-PR publication are encoded in workflow', () => {
+test('publication is candidate-serialized and safely reuses only an equivalent remote retry branch', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  assert.match(workflow, /group: autonomous-candidate-\$\{\{ inputs\.candidate_key \}\}[\s\S]*cancel-in-progress: false/u);
   assert.match(workflow, /automation\/self-improvement\/\$\{\{ steps\.gate\.outputs\.issue \}\}-\$\{\{ github\.run_id \}\}/u);
+  assert.match(workflow, /REMOTE_PARENT=.*[\s\S]*test "\$REMOTE_PARENT" = "\$BASE_SHA"[\s\S]*test "\$REMOTE_TREE" = "\$LOCAL_TREE"/u);
+  assert.doesNotMatch(workflow, /git push[^\n]*--force/u);
   assert.equal((workflow.match(/gh pr create/gu) || []).length, 1);
   assert.match(workflow, /if: steps\.gate\.outputs\.publish == 'true'/u);
+});
+
+test('PUBLISH rechecks candidate eligibility at both final privileged boundaries', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  const publish = workflow.slice(workflow.indexOf('  publish:'));
+  assert.match(publish, /candidate_is_eligible\(\)[\s\S]*p\.eligibleCandidate\(JSON\.parse\(s\)\)/u);
+  assert.equal((publish.match(/if ! candidate_is_eligible/gu) || []).length, 2);
+  assert.match(publish, /if ! candidate_is_eligible[\s\S]*git push[\s\S]*if ! candidate_is_eligible[\s\S]*gh pr create/u);
 });
 
 test('NO_CANDIDATE remains a safe no-op before autonomous dispatch', () => {
