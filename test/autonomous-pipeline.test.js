@@ -21,13 +21,29 @@ const approvalProvenance = (overrides = {}) => ({
     'Evidence Strength': 2, Urgency: 2 }, ...overrides,
 });
 
-test('new SI-승인 label dispatch gate accepts an approved waiting Candidate', () => {
+test('PASS plus eligible Candidate passes both autonomous dispatch gates', () => {
   const payload = { action: 'labeled', label: { name: 'SI-승인' },
     issue: { state: 'open', labels: ['SI-후보', 'SI-승인'].map((name) => ({ name })) } };
   assert.equal(p.approvalEventEligible(payload), true);
   assert.doesNotThrow(() => p.validateCandidatePublication(approvalProvenance(), approvalProvenance()));
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-approval-dispatch.yml'), 'utf8');
   assert.match(workflow, /createWorkflowDispatch[\s\S]*workflow_id: 'autonomous-implementation\.yml'/u);
+  const publisher = readFileSync(join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml'), 'utf8');
+  assert.match(publisher, /\['PASS', 'NOT_APPLICABLE'\]\.includes\(publication\.verificationStatus\)/u);
+});
+
+test('NOT_APPLICABLE plus eligible Candidate passes both autonomous dispatch gates', () => {
+  assert.doesNotThrow(() => p.validateCandidatePublication(
+    approvalProvenance({ verificationStatus: 'NOT_APPLICABLE' }), approvalProvenance()));
+  const publisher = readFileSync(join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml'), 'utf8');
+  assert.match(publisher, /\['PASS', 'NOT_APPLICABLE'\]\.includes\(publication\.verificationStatus\)/u);
+});
+
+test('CONCERN blocks autonomous dispatch', () => {
+  assert.throws(() => p.validateCandidatePublication(
+    approvalProvenance({ verificationStatus: 'CONCERN' }), approvalProvenance()), /not verified and eligible/u);
+  const publisher = readFileSync(join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml'), 'utf8');
+  assert.doesNotMatch(publisher, /\['PASS', 'CONCERN', 'NOT_APPLICABLE'\]\.includes\(publication\.verificationStatus\)\) \{/u);
 });
 
 test('approval dispatch rejects held and rejected Candidates', () => {
