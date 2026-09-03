@@ -9,9 +9,13 @@ function createTodoStore() {
     list() {
       return [...todos];
     },
-    updateStatus(id, status) {
+    updateStatus(id, status, expectedStatus) {
       const todo = todos.find((item) => item.id === id);
       if (!todo) return null;
+
+      if (arguments.length >= 3 && todo.status !== expectedStatus) {
+        throw new StatusConflictError(todo);
+      }
 
       todo.status = status;
       return todo;
@@ -39,4 +43,13 @@ class AssigneeConflictError extends Error {
   }
 }
 
-module.exports = { AssigneeConflictError, createTodoStore };
+class StatusConflictError extends Error {
+  constructor(todo) {
+    super('Status changed since it was loaded');
+    this.name = 'StatusConflictError';
+    this.statusCode = 409;
+    this.currentTodo = todo;
+  }
+}
+
+module.exports = { AssigneeConflictError, StatusConflictError, createTodoStore };

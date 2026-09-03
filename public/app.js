@@ -94,13 +94,25 @@ function render(todos) {
         const response = await fetch(`/api/todos/${encodeURIComponent(todo.id)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: status.value })
+          body: JSON.stringify({
+            status: status.value,
+            expectedStatus: todo.status
+          })
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error);
+        if (!response.ok) {
+          const error = new Error(result.error);
+          error.isConflict = response.status === 409;
+          throw error;
+        }
         await loadTodos({ fresh: true });
       } catch (error) {
         errorMessage.textContent = error.message;
+        if (error.isConflict) {
+          status.blur();
+          await loadTodos({ fresh: true }).catch(() => undefined);
+          return;
+        }
         status.value = todo.status;
         status.disabled = false;
       }
