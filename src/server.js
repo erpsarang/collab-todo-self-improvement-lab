@@ -89,6 +89,10 @@ function createServer(service = createTodoService(createTodoStore())) {
         }
         sendJson(response, 200, todo);
       } catch (error) {
+        if (error.statusCode === 409) {
+          sendJson(response, 409, { error: error.message, currentTodo: error.currentTodo });
+          return;
+        }
         sendJson(response, 400, { error: error.message });
       }
       return;

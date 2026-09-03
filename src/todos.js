@@ -33,11 +33,14 @@ function createTodoService(store, createId = randomUUID) {
     },
     update(id, input = {}) {
       const fields = Object.keys(input);
-      if (fields.length !== 1 || !['status', 'assignedTo'].includes(fields[0])) {
+      const isStatusUpdate = fields.length === 1 && fields[0] === 'status';
+      const isAssigneeUpdate = fields.includes('assignedTo')
+        && fields.every((field) => ['assignedTo', 'expectedAssignedTo'].includes(field));
+      if (!isStatusUpdate && !isAssigneeUpdate) {
         throw new Error('Exactly one of status or assignedTo is required');
       }
 
-      if (fields[0] === 'status') {
+      if (isStatusUpdate) {
         return this.updateStatus(id, input);
       }
 
@@ -45,7 +48,16 @@ function createTodoService(store, createId = randomUUID) {
         throw new Error('Assignee must be a non-empty string');
       }
 
-      return store.updateAssignedTo(id, input.assignedTo.trim());
+      if (Object.hasOwn(input, 'expectedAssignedTo')
+          && input.expectedAssignedTo !== null
+          && typeof input.expectedAssignedTo !== 'string') {
+        throw new Error('Expected assignee must be a string or null');
+      }
+
+      const assignedTo = input.assignedTo.trim();
+      return Object.hasOwn(input, 'expectedAssignedTo')
+        ? store.updateAssignedTo(id, assignedTo, input.expectedAssignedTo)
+        : store.updateAssignedTo(id, assignedTo);
     }
   };
 }
