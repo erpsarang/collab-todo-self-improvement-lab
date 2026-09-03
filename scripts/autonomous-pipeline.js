@@ -67,7 +67,7 @@ function implementationPrompt(publication, { candidateIssue, candidateKey, revie
   }
   const normalizedTitle = publication.title.normalize('NFKC').trim().toLowerCase().replace(/\s+/gu, ' ');
   if (`sha256:${sha256(normalizedTitle)}` !== candidateKey) throw new Error('Implementation prompt Candidate key mismatch');
-  return `Implement the exact approved Candidate below without changing .github, committing, or pushing. Add regression tests.
+  return `Implement the exact approved Candidate below without changing .github, committing, or pushing.
 
 ## Trusted provenance
 - Candidate Issue number: ${candidateIssue}
