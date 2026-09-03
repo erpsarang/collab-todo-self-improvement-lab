@@ -56,8 +56,21 @@
     }, intervalMilliseconds);
   }
 
+  function assigneeDraft(todo, activeAssignee) {
+    if (activeAssignee?.id === todo.id) {
+      return {
+        value: activeAssignee.value,
+        baseAssignedTo: activeAssignee.baseAssignedTo
+      };
+    }
+    return {
+      value: todo.assignedTo || '',
+      baseAssignedTo: todo.assignedTo ?? null
+    };
+  }
+
   function assigneeValue(todo, activeAssignee) {
-    return activeAssignee?.id === todo.id ? activeAssignee.value : (todo.assignedTo || '');
+    return assigneeDraft(todo, activeAssignee).value;
   }
 
   function restoreInteractiveFocus(controls, activeControl) {
@@ -73,5 +86,11 @@
     }
   }
 
-  return { assigneeValue, createTodoLoader, restoreInteractiveFocus, startPeriodicRefresh };
+  return {
+    assigneeDraft,
+    assigneeValue,
+    createTodoLoader,
+    restoreInteractiveFocus,
+    startPeriodicRefresh
+  };
 }));

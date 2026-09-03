@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  assigneeDraft,
   assigneeValue,
   createTodoLoader,
   restoreInteractiveFocus,
@@ -12,6 +13,26 @@ test('keeps an assignee draft only for the input being edited', () => {
 
   assert.equal(assigneeValue(todo, { id: '1', value: '입력 중' }), '입력 중');
   assert.equal(assigneeValue(todo, { id: '2', value: '다른 입력' }), '서버 담당자');
+});
+
+test('keeps the original assignee as the draft base across a remote refresh', () => {
+  const initialTodo = { id: '1', assignedTo: 'X' };
+  const initialDraft = assigneeDraft(initialTodo, null);
+  const activeAssignee = {
+    id: '1',
+    value: 'draft value',
+    baseAssignedTo: initialDraft.baseAssignedTo
+  };
+
+  const refreshedDraft = assigneeDraft(
+    { id: '1', assignedTo: 'Y' },
+    activeAssignee
+  );
+
+  assert.deepEqual(refreshedDraft, {
+    value: 'draft value',
+    baseAssignedTo: 'X'
+  });
 });
 
 test('restores focus and the caret after replacing an assignee input', () => {
