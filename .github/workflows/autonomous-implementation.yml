@@ -86,6 +86,7 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           prompt-file: candidate-prompt.md
           sandbox: workspace-write
+          allow-bot-users: github-actions[bot]
       - name: Create immutable implementation artifact
         shell: bash
         env:

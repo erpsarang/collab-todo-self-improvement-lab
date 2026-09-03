@@ -135,6 +135,17 @@ test('VERIFY independently creates the base-test trust anchor before applying th
   assert.doesNotMatch(workflow, /artifact\/base-tests\.sha256/u);
 });
 
+test('IMPLEMENT explicitly allows only github-actions[bot] to run Codex', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  const implement = workflow.slice(workflow.indexOf('  implement:'), workflow.indexOf('  verify:'));
+  const codexStep = implement.slice(implement.indexOf('      - name: Run Codex in untrusted workspace'),
+    implement.indexOf('      - name: Create immutable implementation artifact'));
+  assert.match(codexStep, /uses: openai\/codex-action@v1[\s\S]*^          allow-bot-users: github-actions\[bot\]$/mu);
+  assert.doesNotMatch(workflow, /allow-bots:\s*true/u);
+  assert.match(implement, /permissions:\n      actions: read\n      contents: read\n      issues: read/u);
+  assert.doesNotMatch(implement, /contents: write/u);
+});
+
 test('recurring Candidate provenance is bound to the trusted Review artifact, not mutable Issue text', () => {
   const publication = approvedPublication();
   const recurringKey = `sha256:${p.sha256('recurring candidate')}`;
