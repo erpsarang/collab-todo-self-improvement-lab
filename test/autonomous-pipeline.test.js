@@ -55,6 +55,12 @@ test('approval provenance accepts current main and rejects a stale publication',
     approvalProvenance({ sourceMergeSha: 'c'.repeat(40) })), /provenance mismatch/u);
 });
 
+test('approval dispatch safely stops when main advances after initial validation', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-approval-dispatch.yml'), 'utf8');
+  assert.match(workflow,
+    /const dispatchMainSha = \(await github\.rest\.repos\.getBranch[\s\S]*dispatchMainSha !== sourceMergeSha[\s\S]*return;[\s\S]*createWorkflowDispatch/u);
+});
+
 test('approval dispatch suppresses active runs and open PRs but not orphan branches', () => {
   const expected = { candidateIssue: 23, candidateKey: key, repository: 'o/r', actor: 'github-actions[bot]' };
   const pr = { state: 'open', body: `<!-- autonomous-candidate-key: ${key} -->`,

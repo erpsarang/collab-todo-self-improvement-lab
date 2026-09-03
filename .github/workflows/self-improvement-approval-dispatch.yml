@@ -132,6 +132,13 @@ jobs:
               core.notice(`Candidate #${issueNumber} already has active autonomous work; skipping dispatch`);
               return;
             }
+            const dispatchMainSha = (await github.rest.repos.getBranch({
+              ...context.repo, branch: 'main',
+            })).data.commit.sha;
+            if (dispatchMainSha !== sourceMergeSha) {
+              core.notice('Main advanced after provenance validation; skipping dispatch');
+              return;
+            }
             await github.rest.actions.createWorkflowDispatch({ ...context.repo,
               workflow_id: 'autonomous-implementation.yml', ref: 'main', inputs: {
                 candidate_issue: String(issueNumber), candidate_key: candidateKey,
