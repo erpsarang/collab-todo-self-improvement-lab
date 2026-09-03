@@ -74,12 +74,20 @@ jobs:
             if (!policy.eligibleCandidate(issue)) {
               throw new Error('Dispatch does not identify an eligible Candidate');
             }
-            fs.writeFileSync('candidate-prompt.md', policy.implementationPrompt(publication, {
+            const implementationPrompt = policy.implementationPrompt(publication, {
               candidateIssue: issueNumber,
               candidateKey: dispatch.candidateKey,
               reviewRunId: dispatch.reviewRunId,
               sourceMergeSha: publication.verifiedMergeSha,
-            }));
+            });
+            const trustedTestPolicy = `
+
+            ## Trusted verification boundary
+            - The entire \`test/**\` tree is the trusted verification surface. Do not create, modify, delete, or rename any path under \`test/**\`.
+            - Implement the Candidate by changing application/production code only.
+            - The VERIFY stage independently runs the existing trusted tests; do not add or alter tests during IMPLEMENT.
+            `;
+            fs.writeFileSync('candidate-prompt.md', implementationPrompt + trustedTestPolicy);
       - name: Run Codex in untrusted workspace
         uses: openai/codex-action@v1
         with:
