@@ -43,17 +43,25 @@ test('approval dispatch fails closed without trusted provenance or with a Candid
   assert.throws(() => p.validateCandidatePublication(approvalProvenance(),
     approvalProvenance({ candidateKey: `sha256:${'f'.repeat(64)}` })), /provenance mismatch/u);
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-approval-dispatch.yml'), 'utf8');
-  assert.match(workflow, /No trusted Publisher provenance found/u);
+  assert.match(workflow, /No trusted verified and eligible publication matches current main/u);
+  assert.match(workflow, /run\.head_sha === main/u);
+  assert.match(workflow, /candidates\.sort\(\(a, b\) => b\.runId - a\.runId\)/u);
   assert.doesNotMatch(workflow, /issue\.body|listComments|createComment/u);
 });
 
-test('approval dispatch suppresses duplicate active autonomous PRs, branches, and runs', () => {
+test('approval provenance accepts current main and rejects a stale publication', () => {
+  assert.doesNotThrow(() => p.validateCandidatePublication(approvalProvenance(), approvalProvenance()));
+  assert.throws(() => p.validateCandidatePublication(approvalProvenance(),
+    approvalProvenance({ sourceMergeSha: 'c'.repeat(40) })), /provenance mismatch/u);
+});
+
+test('approval dispatch suppresses active runs and open PRs but not orphan branches', () => {
   const expected = { candidateIssue: 23, candidateKey: key, repository: 'o/r', actor: 'github-actions[bot]' };
   const pr = { state: 'open', body: `<!-- autonomous-candidate-key: ${key} -->`,
     user: { login: 'github-actions[bot]' }, head: { ref: 'automation/self-improvement/23-20',
       repo: { full_name: 'o/r' } } };
   assert.equal(p.hasActiveAutonomousWork({ pullRequests: [pr] }, expected), true);
-  assert.equal(p.hasActiveAutonomousWork({ branches: [{ name: 'automation/self-improvement/23-19' }] }, expected), true);
+  assert.equal(p.hasActiveAutonomousWork({ branches: [{ name: 'automation/self-improvement/23-19' }] }, expected), false);
   assert.equal(p.hasActiveAutonomousWork({ runs: [{ status: 'in_progress', event: 'workflow_dispatch',
     display_title: `Autonomous Candidate #23 candidate-key:${key}` }] }, expected), true);
   assert.equal(p.hasActiveAutonomousWork({}, expected), false);

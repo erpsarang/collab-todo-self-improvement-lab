@@ -22,13 +22,15 @@ jobs:
       - uses: actions/checkout@v4
         with: { ref: main, persist-credentials: false }
 
-      - name: Locate trusted Publisher run
+      - name: Locate current-main Publisher candidates
         id: publisher
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('node:fs');
             const policy = require('./scripts/autonomous-pipeline');
             if (!policy.approvalEventEligible(context.payload)) throw new Error('Approval event is not eligible');
+            const main = (await github.rest.repos.getBranch({ ...context.repo, branch: 'main' })).data.commit.sha;
             const name = `candidate-publication-${context.payload.issue.number}`;
             const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {
               ...context.repo, name, per_page: 100,
@@ -40,49 +42,68 @@ jobs:
               if (run.name === 'Self-Improvement Candidate Publisher' &&
                   run.path === '.github/workflows/self-improvement-candidate-publisher.yml' &&
                   run.event === 'workflow_run' && run.status === 'completed' && run.conclusion === 'success' &&
-                  run.head_branch === 'main' && /^[0-9a-f]{40}$/iu.test(run.head_sha)) candidates.push(run);
+                  run.head_branch === 'main' && run.head_sha === main) {
+                candidates.push({ artifactId: artifact.id, runId: run.id });
+              }
             }
-            if (candidates.length === 0) throw new Error('No trusted Publisher provenance found');
-            candidates.sort((a, b) => b.id - a.id);
-            core.setOutput('run-id', String(candidates[0].id));
-            core.setOutput('head-sha', candidates[0].head_sha);
+            candidates.sort((a, b) => b.runId - a.runId);
+            fs.writeFileSync('/tmp/publisher-candidates.json', JSON.stringify(candidates));
+            core.setOutput('main-sha', main);
 
-      - name: Download exact trusted Publisher artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: candidate-publication-${{ github.event.issue.number }}
-          path: /tmp/publisher-artifact
-          run-id: ${{ steps.publisher.outputs.run-id }}
-          github-token: ${{ github.token }}
-
-      - name: Validate Publisher provenance
+      - name: Select latest trusted current-main publication
         id: provenance
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const policy = require('./scripts/autonomous-pipeline');
-            const publication = policy.readJson('/tmp/publisher-artifact/publisher-dispatch.json');
-            policy.validateCandidatePublication(publication, {
-              candidateIssue: context.payload.issue.number,
-              candidateKey: publication.candidateKey,
-              reviewRunId: publication.reviewRunId,
-              sourceMergeSha: publication.sourceMergeSha,
-              publisherRunId: Number('${{ steps.publisher.outputs.run-id }}'),
-            });
-            if ('${{ steps.publisher.outputs.head-sha }}' !== publication.sourceMergeSha) {
-              throw new Error('Publisher source merge SHA mismatch');
-            }
-            core.setOutput('candidate-key', publication.candidateKey);
-            core.setOutput('review-run-id', String(publication.reviewRunId));
-            core.setOutput('source-sha', publication.sourceMergeSha);
-
-      - name: Download exact trusted Review artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: self-improvement-review
-          path: /tmp/review-artifact
-          run-id: ${{ steps.provenance.outputs.review-run-id }}
-          github-token: ${{ github.token }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_ISSUE: ${{ github.event.issue.number }}
+          CURRENT_MAIN_SHA: ${{ steps.publisher.outputs.main-sha }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r candidate; do
+            artifact_id=$(jq -r .artifactId <<<"$candidate")
+            publisher_run_id=$(jq -r .runId <<<"$candidate")
+            rm -rf /tmp/publication-check && mkdir -p /tmp/publication-check/publisher /tmp/publication-check/review
+            gh api "repos/$REPOSITORY/actions/artifacts/$artifact_id/zip" > /tmp/publication-check/publisher.zip || continue
+            unzip -qq /tmp/publication-check/publisher.zip -d /tmp/publication-check/publisher || continue
+            publication=/tmp/publication-check/publisher/publisher-dispatch.json
+            [ -f "$publication" ] || continue
+            review_run_id=$(jq -r '.reviewRunId // empty' "$publication")
+            [[ "$review_run_id" =~ ^[1-9][0-9]*$ ]] || continue
+            gh api "repos/$REPOSITORY/actions/runs/$review_run_id" > /tmp/publication-check/review-run.json || continue
+            review_artifact_id=$(gh api --paginate "repos/$REPOSITORY/actions/runs/$review_run_id/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "self-improvement-review" and (.expired | not))] | sort_by(.id) | last | .id // empty')
+            [ -n "$review_artifact_id" ] || continue
+            gh api "repos/$REPOSITORY/actions/artifacts/$review_artifact_id/zip" > /tmp/publication-check/review.zip || continue
+            unzip -qq /tmp/publication-check/review.zip -d /tmp/publication-check/review || continue
+            if node - "$publication" /tmp/publication-check/review/self-improvement-publication.json \
+              /tmp/publication-check/review-run.json "$CANDIDATE_ISSUE" "$publisher_run_id" "$CURRENT_MAIN_SHA" <<'NODE'
+          const policy = require('./scripts/autonomous-pipeline');
+          const [publicationPath, reviewPath, runPath, issueText, publisherText, mainSha] = process.argv.slice(2);
+          const publication = policy.readJson(publicationPath);
+          const reviewPublication = policy.readJson(reviewPath);
+          const review = policy.readJson(runPath);
+          const expected = {
+            candidateIssue: Number(issueText), candidateKey: publication.candidateKey,
+            reviewRunId: publication.reviewRunId, sourceMergeSha: mainSha,
+            publisherRunId: Number(publisherText),
+          };
+          policy.validateCandidatePublication(publication, expected);
+          policy.validateReviewProvenance(review, reviewPublication, expected);
+          NODE
+            then
+              cp "$publication" /tmp/selected-publication.json
+              cp /tmp/publication-check/review/self-improvement-publication.json /tmp/selected-review.json
+              {
+                echo "publisher-run-id=$publisher_run_id"
+                echo "review-run-id=$review_run_id"
+                echo "source-sha=$CURRENT_MAIN_SHA"
+                echo "candidate-key=$(jq -r .candidateKey "$publication")"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done < <(jq -c '.[]' /tmp/publisher-candidates.json)
+          echo "No trusted verified and eligible publication matches current main" >&2
+          exit 1
 
       - name: Revalidate and dispatch existing autonomous workflow
         uses: actions/github-script@v7
@@ -97,15 +118,14 @@ jobs:
             const sourceMergeSha = '${{ steps.provenance.outputs.source-sha }}';
             const candidateKey = '${{ steps.provenance.outputs.candidate-key }}';
             const review = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: reviewRunId })).data;
-            const reviewPublication = policy.readJson('/tmp/review-artifact/self-improvement-publication.json');
+            const reviewPublication = policy.readJson('/tmp/selected-review.json');
             policy.validateReviewProvenance(review, reviewPublication, { reviewRunId, sourceMergeSha, candidateKey });
-            const [runs, branches, pullRequests] = await Promise.all([
+            const [runs, pullRequests] = await Promise.all([
               github.paginate(github.rest.actions.listWorkflowRuns, { ...context.repo,
                 workflow_id: 'autonomous-implementation.yml', per_page: 100 }),
-              github.paginate(github.rest.repos.listBranches, { ...context.repo, per_page: 100 }),
               github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 }),
             ]);
-            if (policy.hasActiveAutonomousWork({ runs, branches, pullRequests }, {
+            if (policy.hasActiveAutonomousWork({ runs, pullRequests }, {
               candidateIssue: issueNumber, candidateKey, repository: `${context.repo.owner}/${context.repo.repo}`,
               actor: 'github-actions[bot]',
             })) {
@@ -116,6 +136,6 @@ jobs:
               workflow_id: 'autonomous-implementation.yml', ref: 'main', inputs: {
                 candidate_issue: String(issueNumber), candidate_key: candidateKey,
                 review_run_id: String(reviewRunId), source_merge_sha: sourceMergeSha,
-                publisher_run_id: '${{ steps.publisher.outputs.run-id }}',
+                publisher_run_id: '${{ steps.provenance.outputs.publisher-run-id }}',
               },
             });
