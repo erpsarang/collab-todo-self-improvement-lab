@@ -306,6 +306,19 @@ test('PUBLISH rechecks candidate eligibility at both final privileged boundaries
   assert.match(publish, /if ! candidate_is_eligible[\s\S]*git push[\s\S]*if ! candidate_is_eligible[\s\S]*gh pr create/u);
 });
 
+test('PUBLISH PR body reports trusted provenance, VERIFY PASS, and closes the Candidate', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/autonomous-implementation.yml'), 'utf8');
+  const publish = workflow.slice(workflow.indexOf('  publish:'));
+  assert.match(publish, /core\.setOutput\('review_run_id',String\(m\.reviewRunId\)\)/u);
+  assert.match(publish, /core\.setOutput\('source_merge_sha',m\.sourceMergeSha\)/u);
+  assert.match(publish, /Candidate Issue: #\$\{\{ steps\.gate\.outputs\.issue \}\}/u);
+  assert.match(publish, /Candidate Key: \$\{\{ steps\.gate\.outputs\.key \}\}/u);
+  assert.match(publish, /Source Review run ID: \$\{\{ steps\.gate\.outputs\.review_run_id \}\}/u);
+  assert.match(publish, /Source merge SHA: \$\{\{ steps\.gate\.outputs\.source_merge_sha \}\}/u);
+  assert.match(publish, /Verification: PASS — independently verified implementation artifact/u);
+  assert.match(publish, /\\n\\nCloses #\$\{\{ steps\.gate\.outputs\.issue \}\}'/u);
+});
+
 test('NO_CANDIDATE remains a safe no-op before autonomous dispatch', () => {
   const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-candidate-publisher.yml'), 'utf8');
   assert.ok(workflow.indexOf("publication.result === 'NO_CANDIDATE'") < workflow.indexOf('createWorkflowDispatch'));

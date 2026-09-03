@@ -194,6 +194,7 @@ jobs:
               core.notice('Owned implementation PR already exists'); core.setOutput('publish','false'); return;
             }
             core.setOutput('publish','true'); core.setOutput('issue',String(m.candidateIssue)); core.setOutput('key',m.candidateKey);
+            core.setOutput('review_run_id',String(m.reviewRunId)); core.setOutput('source_merge_sha',m.sourceMergeSha);
       - name: Apply exact verified patch and publish retryable branch
         if: steps.gate.outputs.publish == 'true'
         env: { GH_TOKEN: '${{ github.token }}' }
@@ -240,4 +241,4 @@ jobs:
             exit 0
           fi
           gh pr create --base main --head "$BRANCH" --title "Implement self-improvement Candidate #${{ steps.gate.outputs.issue }}" \
-            --body $'<!-- autonomous-candidate-key: ${{ steps.gate.outputs.key }} -->\nImplements Candidate #${{ steps.gate.outputs.issue }} using the exact independently verified implementation artifact.'
+            --body $'<!-- autonomous-candidate-key: ${{ steps.gate.outputs.key }} -->\nCandidate Issue: #${{ steps.gate.outputs.issue }}\nCandidate Key: ${{ steps.gate.outputs.key }}\nSource Review run ID: ${{ steps.gate.outputs.review_run_id }}\nSource merge SHA: ${{ steps.gate.outputs.source_merge_sha }}\nVerification: PASS — independently verified implementation artifact\n\nCloses #${{ steps.gate.outputs.issue }}'
