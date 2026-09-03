@@ -77,16 +77,33 @@ test('approval dispatch safely stops when main advances after initial validation
     /const dispatchMainSha = \(await github\.rest\.repos\.getBranch[\s\S]*dispatchMainSha !== sourceMergeSha[\s\S]*return;[\s\S]*createWorkflowDispatch/u);
 });
 
-test('approval dispatch suppresses active runs and open PRs but not orphan branches', () => {
-  const expected = { candidateIssue: 23, candidateKey: key, repository: 'o/r', actor: 'github-actions[bot]' };
+test('approval dispatch suppresses active runs, open PRs, and trusted autonomous branches', () => {
+  const expected = { candidateIssue: 23, candidateKey: key, repository: 'o/r', actor: 'github-actions[bot]',
+    sourceMergeSha: base };
   const pr = { state: 'open', body: `<!-- autonomous-candidate-key: ${key} -->`,
     user: { login: 'github-actions[bot]' }, head: { ref: 'automation/self-improvement/23-20',
       repo: { full_name: 'o/r' } } };
+  const run = { id: 19, status: 'completed', conclusion: 'success', event: 'workflow_dispatch',
+    name: 'Autonomous Implementation Pipeline', path: '.github/workflows/autonomous-implementation.yml',
+    head_branch: 'main', head_sha: base,
+    display_title: `Autonomous Candidate #23 candidate-key:${key}` };
+  const branch = { name: 'automation/self-improvement/23-19', commit: {
+    commit: { message: 'Implement self-improvement Candidate #23' }, parents: [{ sha: base }],
+    committer: { login: 'github-actions[bot]' },
+  } };
   assert.equal(p.hasActiveAutonomousWork({ pullRequests: [pr] }, expected), true);
-  assert.equal(p.hasActiveAutonomousWork({ branches: [{ name: 'automation/self-improvement/23-19' }] }, expected), false);
+  assert.equal(p.hasActiveAutonomousWork({ runs: [run], branches: [branch] }, expected), true);
+  assert.equal(p.hasActiveAutonomousWork({ runs: [], branches: [branch] }, expected), false);
+  assert.equal(p.hasActiveAutonomousWork({ runs: [run], branches: [{ ...branch,
+    name: 'automation/self-improvement/24-19' }] }, expected), false);
   assert.equal(p.hasActiveAutonomousWork({ runs: [{ status: 'in_progress', event: 'workflow_dispatch',
     display_title: `Autonomous Candidate #23 candidate-key:${key}` }] }, expected), true);
   assert.equal(p.hasActiveAutonomousWork({}, expected), false);
+});
+
+test('approval workflow retrieves branch commits for trusted autonomous provenance', () => {
+  const workflow = readFileSync(join(__dirname, '../.github/workflows/self-improvement-approval-dispatch.yml'), 'utf8');
+  assert.match(workflow, /repos\.listBranches[\s\S]*repos\.getCommit[\s\S]*hasActiveAutonomousWork\(\{ runs, branches, pullRequests \}/u);
 });
 
 test('approval dispatch ignores labels other than SI-승인', () => {

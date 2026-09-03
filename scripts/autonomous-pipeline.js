@@ -3,7 +3,7 @@ const { readFileSync } = require('node:fs');
 
 const SHA = /^[0-9a-f]{40}$/iu;
 const KEY = /^sha256:[0-9a-f]{64}$/u;
-const AUTOMATION_BRANCH = /^automation\/self-improvement\/\d+-[0-9]+$/u;
+const AUTOMATION_BRANCH = /^automation\/self-improvement\/(\d+)-([0-9]+)$/u;
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -125,10 +125,24 @@ function approvalEventEligible(payload) {
   return payload?.action === 'labeled' && payload?.label?.name === 'SI-승인' && eligibleCandidate(payload.issue);
 }
 
-function hasActiveAutonomousWork({ runs = [], pullRequests = [] }, expected) {
+function hasActiveAutonomousWork({ runs = [], branches = [], pullRequests = [] }, expected) {
   const titleMarker = `candidate-key:${expected.candidateKey}`;
   if (runs.some((run) => ['queued', 'in_progress'].includes(run.status) &&
       run.event === 'workflow_dispatch' && String(run.display_title || '').includes(titleMarker))) return true;
+  const trustedBranch = branches.some((branch) => {
+    const match = String(branch?.name || '').match(AUTOMATION_BRANCH);
+    if (!match || Number(match[1]) !== expected.candidateIssue) return false;
+    const runId = Number(match[2]);
+    const run = runs.find((item) => item.id === runId);
+    return run?.name === 'Autonomous Implementation Pipeline' &&
+      run.path === '.github/workflows/autonomous-implementation.yml' && run.event === 'workflow_dispatch' &&
+      run.head_branch === 'main' && run.head_sha === expected.sourceMergeSha &&
+      run.display_title === `Autonomous Candidate #${expected.candidateIssue} candidate-key:${expected.candidateKey}` &&
+      branch.commit?.commit?.message === `Implement self-improvement Candidate #${expected.candidateIssue}` &&
+      branch.commit?.parents?.length === 1 && branch.commit.parents[0].sha === expected.sourceMergeSha &&
+      branch.commit?.committer?.login === expected.actor;
+  });
+  if (trustedBranch) return true;
   return pullRequests.some((pr) => isOwnedDuplicate(pr, expected));
 }
 

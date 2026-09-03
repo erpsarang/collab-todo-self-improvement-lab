@@ -120,14 +120,20 @@ jobs:
             const review = (await github.rest.actions.getWorkflowRun({ ...context.repo, run_id: reviewRunId })).data;
             const reviewPublication = policy.readJson('/tmp/selected-review.json');
             policy.validateReviewProvenance(review, reviewPublication, { reviewRunId, sourceMergeSha, candidateKey });
-            const [runs, pullRequests] = await Promise.all([
+            const [runs, branchRefs, pullRequests] = await Promise.all([
               github.paginate(github.rest.actions.listWorkflowRuns, { ...context.repo,
                 workflow_id: 'autonomous-implementation.yml', per_page: 100 }),
+              github.paginate(github.rest.repos.listBranches, { ...context.repo, per_page: 100 }),
               github.paginate(github.rest.pulls.list, { ...context.repo, state: 'open', per_page: 100 }),
             ]);
-            if (policy.hasActiveAutonomousWork({ runs, pullRequests }, {
+            const branchPattern = new RegExp(`^automation/self-improvement/${issueNumber}-[0-9]+$`);
+            const branches = await Promise.all(branchRefs.filter((branch) => branchPattern.test(branch.name))
+              .map(async (branch) => ({ ...branch,
+                commit: (await github.rest.repos.getCommit({ ...context.repo, ref: branch.name })).data,
+              })));
+            if (policy.hasActiveAutonomousWork({ runs, branches, pullRequests }, {
               candidateIssue: issueNumber, candidateKey, repository: `${context.repo.owner}/${context.repo.repo}`,
-              actor: 'github-actions[bot]',
+              actor: 'github-actions[bot]', sourceMergeSha,
             })) {
               core.notice(`Candidate #${issueNumber} already has active autonomous work; skipping dispatch`);
               return;
