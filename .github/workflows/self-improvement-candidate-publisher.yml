@@ -109,7 +109,7 @@ jobs:
             const labels = [
               ['SI-후보', '5319e7', 'Self-improvement candidate registry record'],
               ['SI-승인대기', 'd4c5f9', 'Awaiting a human decision'],
-              ['SI-승인', '0e8a16', 'Approved by a human; does not trigger implementation'],
+              ['SI-승인', '0e8a16', 'Approved by a human for autonomous implementation'],
               ['SI-보류', 'fbca04', 'Deferred by a human'],
               ['SI-거절', 'b60205', 'Rejected by a human'],
             ];
@@ -130,7 +130,7 @@ jobs:
               }
             }
 
-            const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${publication.title}\n\n## Observation\n${publication.observation}\n\n## Evidence\n${publication.evidence}\n\n## Impact\n${publication.impact}\n\n## Scores\n${scoresMarkdown}\n\n## Suggested Scope\n${publication.suggestedScope}\n\n## Non-Goals\n${publication.nonGoals}\n\n## Verification Status\n${publication.verificationStatus}\n\n## Verification Target\n${publication.verificationTarget || 'Not applicable'}\n\n## Verification Evidence\n${publication.verificationEvidence}\n\n## Residual Risk\n${publication.residualRisk}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${publication.verifiedMergeSha}\`\n- Candidate Key: \`${key}\`\n\nChanging the human-decision label records a decision only. Approval does not start implementation, create a branch or pull request, or merge code.`;
+            const body = `${keyMarker}\n${runMarker}\n# Candidate Registry Record\n\n## Candidate Title\n${publication.title}\n\n## Observation\n${publication.observation}\n\n## Evidence\n${publication.evidence}\n\n## Impact\n${publication.impact}\n\n## Scores\n${scoresMarkdown}\n\n## Suggested Scope\n${publication.suggestedScope}\n\n## Non-Goals\n${publication.nonGoals}\n\n## Verification Status\n${publication.verificationStatus}\n\n## Verification Target\n${publication.verificationTarget || 'Not applicable'}\n\n## Verification Evidence\n${publication.verificationEvidence}\n\n## Residual Risk\n${publication.residualRisk}\n\n## Source\n- Self-Improvement Review run ID: ${process.env.SOURCE_RUN_ID}\n- Source merge SHA: \`${publication.verifiedMergeSha}\`\n- Candidate Key: \`${key}\`\n\nHuman-decision labels control eligibility. Approval does not start implementation until immutable provenance is revalidated, and it never auto-merges code.`;
             const candidateKeyFromBody = (issueBody) => String(issueBody || '').match(
               /^<!-- self-improvement-candidate-key: (sha256:[0-9a-f]{64}) -->(?:\r?\n|$)/u,
             )?.[1] || null;
@@ -225,28 +225,33 @@ jobs:
               await github.rest.issues.update({ ...context.repo, issue_number: duplicate.number, state: 'closed' });
             }
             core.info(`Candidate reconciled in canonical Issue #${canonical.number}`);
+            fs.writeFileSync('candidate-artifact/publisher-dispatch.json', JSON.stringify({
+              schemaVersion: 1,
+              candidateIssue: canonical.number,
+              candidateKey: key,
+              reviewRunId: Number(process.env.SOURCE_RUN_ID),
+              sourceMergeSha: publication.verifiedMergeSha,
+              publisherRunId: context.runId,
+              verificationStatus: publication.verificationStatus,
+              eligibilityScore: publication.total,
+              scores: publication.scores,
+            }));
+            core.setOutput?.('published', 'true');
+            core.setOutput?.('candidate-issue', String(canonical.number));
+            core.setOutput?.('candidate-key', key);
+            core.setOutput?.('source-sha', publication.verifiedMergeSha);
             const canonicalLabels = new Set((canonical.labels || []).map((label) => typeof label === 'string' ? label : label.name));
             if (canonical.state !== 'closed' && canonicalLabels.has('SI-후보') && canonicalLabels.has('SI-승인') &&
-                !canonicalLabels.has('SI-보류') && !canonicalLabels.has('SI-거절')) {
-              fs.writeFileSync('candidate-artifact/publisher-dispatch.json', JSON.stringify({
-                schemaVersion: 1,
-                candidateIssue: canonical.number,
-                candidateKey: key,
-                reviewRunId: Number(process.env.SOURCE_RUN_ID),
-                sourceMergeSha: publication.verifiedMergeSha,
-                publisherRunId: context.runId,
-              }));
+                !canonicalLabels.has('SI-보류') && !canonicalLabels.has('SI-거절') &&
+                publication.verificationStatus === 'PASS') {
               core.setOutput('dispatch', 'true');
-              core.setOutput('candidate-issue', String(canonical.number));
-              core.setOutput('candidate-key', key);
-              core.setOutput('source-sha', publication.verifiedMergeSha);
             }
 
       - name: Upload immutable Publisher dispatch provenance
-        if: steps.candidate.outputs.dispatch == 'true'
+        if: steps.candidate.outputs.published == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: autonomous-dispatch-${{ github.run_id }}
+          name: candidate-publication-${{ steps.candidate.outputs.candidate-issue }}
           path: candidate-artifact/publisher-dispatch.json
           if-no-files-found: error
 
