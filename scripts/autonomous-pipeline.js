@@ -111,7 +111,7 @@ function validatePublisherDispatch(dispatch, expected) {
 function validateCandidatePublication(value, expected) {
   validatePublisherDispatch(value, expected);
   const scoreNames = ['User Impact', 'Reliability Impact', 'Collaboration Impact', 'Evidence Strength', 'Urgency'];
-  if (value.verificationStatus !== 'PASS' || !value.scores ||
+  if (!['PASS', 'NOT_APPLICABLE'].includes(value.verificationStatus) || !value.scores ||
       scoreNames.some((name) => !Number.isInteger(value.scores[name]) || value.scores[name] < 0 || value.scores[name] > 3) ||
       scoreNames.reduce((sum, name) => sum + value.scores[name], 0) !== value.eligibilityScore ||
       value.eligibilityScore < 9 || value.scores['Evidence Strength'] < 2 ||

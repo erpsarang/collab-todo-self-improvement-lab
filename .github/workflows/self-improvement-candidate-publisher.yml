@@ -243,7 +243,7 @@ jobs:
             const canonicalLabels = new Set((canonical.labels || []).map((label) => typeof label === 'string' ? label : label.name));
             if (canonical.state !== 'closed' && canonicalLabels.has('SI-후보') && canonicalLabels.has('SI-승인') &&
                 !canonicalLabels.has('SI-보류') && !canonicalLabels.has('SI-거절') &&
-                publication.verificationStatus === 'PASS') {
+                ['PASS', 'NOT_APPLICABLE'].includes(publication.verificationStatus)) {
               core.setOutput('dispatch', 'true');
             }
 
