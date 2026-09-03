@@ -29,11 +29,18 @@ function createTodoService(store, createId = randomUUID) {
         throw new Error('Status must be TODO, DOING, or DONE');
       }
 
-      return store.updateStatus(id, input.status);
+      if (Object.hasOwn(input, 'expectedStatus') && !allowedStatuses.has(input.expectedStatus)) {
+        throw new Error('Expected status must be TODO, DOING, or DONE');
+      }
+
+      return Object.hasOwn(input, 'expectedStatus')
+        ? store.updateStatus(id, input.status, input.expectedStatus)
+        : store.updateStatus(id, input.status);
     },
     update(id, input = {}) {
       const fields = Object.keys(input);
-      const isStatusUpdate = fields.length === 1 && fields[0] === 'status';
+      const isStatusUpdate = fields.includes('status')
+        && fields.every((field) => ['status', 'expectedStatus'].includes(field));
       const isAssigneeUpdate = fields.includes('assignedTo')
         && fields.every((field) => ['assignedTo', 'expectedAssignedTo'].includes(field));
       if (!isStatusUpdate && !isAssigneeUpdate) {
