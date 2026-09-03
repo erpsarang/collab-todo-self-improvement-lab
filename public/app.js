@@ -15,7 +15,11 @@ function render(todos) {
       }
     : null;
   const activeAssignee = focusedControl?.control === 'assignee'
-    ? { ...focusedControl, value: document.activeElement.value }
+    ? {
+        ...focusedControl,
+        value: document.activeElement.value,
+        baseAssignedTo: document.activeElement.baseAssignedTo
+      }
     : null;
 
   list.replaceChildren(...todos.map((todo) => {
@@ -32,7 +36,9 @@ function render(todos) {
     assigneeLabel.textContent = '담당자';
     assignee.dataset.todoId = todo.id;
     assignee.dataset.control = 'assignee';
-    assignee.value = todoRefresh.assigneeValue(todo, activeAssignee);
+    const assigneeDraft = todoRefresh.assigneeDraft(todo, activeAssignee);
+    assignee.value = assigneeDraft.value;
+    assignee.baseAssignedTo = assigneeDraft.baseAssignedTo;
     assignee.placeholder = '담당자 이름';
     assignee.setAttribute('aria-label', `${todo.title} 담당자`);
     assignButton.type = 'button';
@@ -47,13 +53,25 @@ function render(todos) {
         const response = await fetch(`/api/todos/${encodeURIComponent(todo.id)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ assignedTo: assignee.value })
+          body: JSON.stringify({
+            assignedTo: assignee.value,
+            expectedAssignedTo: assignee.baseAssignedTo
+          })
         });
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error);
+        if (!response.ok) {
+          const error = new Error(result.error);
+          error.isConflict = response.status === 409;
+          throw error;
+        }
         await loadTodos({ fresh: true });
       } catch (error) {
         errorMessage.textContent = error.message;
+        if (error.isConflict) {
+          assignee.blur();
+          await loadTodos({ fresh: true }).catch(() => undefined);
+          return;
+        }
         assignee.disabled = false;
         assignButton.disabled = false;
       }
